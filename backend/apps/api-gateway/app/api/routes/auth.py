@@ -49,6 +49,17 @@ class SchoolResponse(BaseModel):
     name: str
 
 
+class MeResponse(BaseModel):
+    id: int
+    username: str
+    role: str
+    full_name: str | None = None
+    major: str | None = None
+    class_name: str | None = None
+    school_name: str | None = None
+    is_active: bool
+
+
 @router.get("/schools", response_model=list[SchoolResponse])
 def search_schools(
     q: str = "",
@@ -124,6 +135,22 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse
     return LoginResponse(access_token=token)
 
 
-@router.get("/me")
-def me(current_user: dict = Depends(get_current_user)) -> dict:
-    return current_user
+@router.get("/me", response_model=MeResponse)
+def me(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)) -> MeResponse:
+    user = db.query(User).filter(User.id == current_user["id"]).first()
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+        )
+
+    return MeResponse(
+        id=user.id,
+        username=user.username,
+        role=user.role,
+        full_name=user.full_name,
+        major=user.major,
+        class_name=user.class_name,
+        school_name=user.school.name if user.school else None,
+        is_active=user.is_active,
+    )

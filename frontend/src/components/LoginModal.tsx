@@ -155,7 +155,7 @@ export default function LoginModal({
                   <input
                     value={loginForm.username}
                     onChange={(event) => onSetLoginForm((prev) => ({ ...prev, username: event.target.value }))}
-                    placeholder="请输入账号（手机号或 yzcube）"
+                    placeholder="请输入账号（手机号）"
                     className="w-full rounded-2xl border border-slate-200 bg-white px-12 py-3 text-[15px] text-slate-700 outline-none focus:border-blue-400 focus:ring-4 focus:ring-blue-100/70"
                   />
                 </div>

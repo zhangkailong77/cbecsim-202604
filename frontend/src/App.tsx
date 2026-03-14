@@ -5,11 +5,39 @@ import LoginModal, {
   RegisterFormState,
   SchoolOption,
 } from './components/LoginModal';
+import GameSetupPage, { CreateRunPayload } from './modules/game-setup/GameSetupPage';
+import MarketIntelPage from './modules/market-intel/MarketIntelPage';
+import LogisticsClearancePage from './modules/logistics-clearance/LogisticsClearancePage';
 import ShopeePage from './modules/shopee/ShopeePage';
 import homeLogo from './assets/home/logo.png';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000';
 const ACCESS_TOKEN_KEY = 'cbec_access_token';
+
+type AppStage = 'loading' | 'setup' | 'intel' | 'logistics' | 'shopee';
+
+interface CurrentRunResponse {
+  run: {
+    id: number;
+    user_id: number;
+    initial_cash: number;
+    market: string;
+    duration_days: number;
+    day_index: number;
+    status: string;
+    created_at: string;
+  } | null;
+}
+
+interface MeResponse {
+  id: number;
+  username: string;
+  role: string;
+  full_name: string | null;
+  major: string | null;
+  class_name: string | null;
+  school_name: string | null;
+}
 
 export default function App() {
   const [authMode, setAuthMode] = useState<AuthMode>('login');
@@ -17,7 +45,13 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isAuthChecking, setIsAuthChecking] = useState(true);
+  const [isAuthChecking, setIsAuthChecking] = useState(false);
+  const [appStage, setAppStage] = useState<AppStage>('loading');
+  const [currentRun, setCurrentRun] = useState<CurrentRunResponse['run']>(null);
+  const [setupError, setSetupError] = useState('');
+  const [isStartingRun, setIsStartingRun] = useState(false);
+  const [isResettingRun, setIsResettingRun] = useState(false);
+  const [currentUser, setCurrentUser] = useState<MeResponse | null>(null);
   const [schoolKeyword, setSchoolKeyword] = useState('');
   const [schoolOptions, setSchoolOptions] = useState<SchoolOption[]>([]);
   const [isSchoolLoading, setIsSchoolLoading] = useState(false);
@@ -36,31 +70,70 @@ export default function App() {
     confirmPassword: '',
   });
 
+  const resolveStageByCurrentRun = async (token: string) => {
+    setSetupError('');
+    setAppStage('loading');
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/game/runs/current`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (!response.ok) {
+        setSetupError('读取开局信息失败，请重试。');
+        setCurrentRun(null);
+        setAppStage('setup');
+        return;
+      }
+
+      const data = (await response.json()) as CurrentRunResponse;
+      setCurrentRun(data.run);
+      // Always land on setup page first; user enters Shopee manually.
+      setAppStage('setup');
+    } catch {
+      setSetupError('读取开局信息失败，请检查网络后重试。');
+      setCurrentRun(null);
+      setAppStage('setup');
+    }
+  };
+
+  const fetchMe = async (token: string): Promise<MeResponse | null> => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/me`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) return null;
+      return (await response.json()) as MeResponse;
+    } catch {
+      return null;
+    }
+  };
+
   useEffect(() => {
-    const verifyExistingToken = async () => {
+    const restoreSession = async () => {
+      setIsAuthChecking(true);
       const token = localStorage.getItem(ACCESS_TOKEN_KEY);
       if (!token) {
         setIsAuthChecking(false);
         return;
       }
 
-      try {
-        const response = await fetch(`${API_BASE_URL}/auth/me`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (response.ok) {
-          setIsAuthenticated(true);
-        } else {
-          localStorage.removeItem(ACCESS_TOKEN_KEY);
-        }
-      } catch {
+      const me = await fetchMe(token);
+      if (!me) {
         localStorage.removeItem(ACCESS_TOKEN_KEY);
-      } finally {
+        setIsAuthenticated(false);
+        setCurrentUser(null);
         setIsAuthChecking(false);
+        return;
       }
+
+      setCurrentUser(me);
+      setIsAuthenticated(true);
+      await resolveStageByCurrentRun(token);
+      setIsAuthChecking(false);
     };
 
-    void verifyExistingToken();
+    void restoreSession();
   }, []);
 
   useEffect(() => {
@@ -117,8 +190,17 @@ export default function App() {
 
       const result = await response.json();
       localStorage.setItem(ACCESS_TOKEN_KEY, result.access_token);
+      const me = await fetchMe(result.access_token);
+      if (!me) {
+        localStorage.removeItem(ACCESS_TOKEN_KEY);
+        setAuthError('读取用户信息失败，请重新登录。');
+        return;
+      }
+      setCurrentUser(me);
       setIsAuthenticated(true);
+      setAppStage('loading');
       setLoginForm({ username: '', password: '' });
+      await resolveStageByCurrentRun(result.access_token);
     } catch {
       setAuthError('登录服务暂不可用，请稍后再试。');
     } finally {
@@ -194,9 +276,166 @@ export default function App() {
     }
   };
 
+  const handleCreateRun = async (payload: CreateRunPayload) => {
+    const token = localStorage.getItem(ACCESS_TOKEN_KEY);
+    if (!token) {
+      setSetupError('登录状态失效，请重新登录。');
+      setIsAuthenticated(false);
+      return;
+    }
+
+    setIsStartingRun(true);
+    setSetupError('');
+    try {
+      const response = await fetch(`${API_BASE_URL}/game/runs`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (response.status === 201) {
+        const created = (await response.json()) as NonNullable<CurrentRunResponse['run']>;
+        setCurrentRun(created);
+        setAppStage('intel');
+        return;
+      }
+
+      if (response.status === 409) {
+        await resolveStageByCurrentRun(token);
+        return;
+      }
+
+      const data = await response.json().catch(() => ({}));
+      setSetupError(data.detail || '开局创建失败，请稍后重试。');
+    } catch {
+      setSetupError('开局创建失败，请检查网络后重试。');
+    } finally {
+      setIsStartingRun(false);
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem(ACCESS_TOKEN_KEY);
+    setIsAuthenticated(false);
+    setCurrentUser(null);
+    setAuthMode('login');
+    setAppStage('loading');
+    setAuthError('');
+    setSetupError('');
+    setLoginForm({ username: '', password: '' });
+  };
+
+  const handleEnterRunningRun = () => {
+    setAppStage('intel');
+  };
+
+  const handleEnterLogisticsFromSetup = () => {
+    setAppStage('logistics');
+  };
+
+  const handleEnterShopeeFromSetup = () => {
+    setAppStage('shopee');
+  };
+
+  const handleEnterShopeeFromIntel = () => {
+    setAppStage('logistics');
+  };
+
+  const handleEnterShopeeFromLogistics = () => {
+    setAppStage('shopee');
+  };
+
+  const handleBackToSetupFromIntel = () => {
+    setAppStage('setup');
+  };
+
+  const handleBackToSetupFromLogistics = () => {
+    setAppStage('setup');
+  };
+
+  const handleResetCurrentRun = async () => {
+    const token = localStorage.getItem(ACCESS_TOKEN_KEY);
+    if (!token) {
+      setSetupError('登录状态失效，请重新登录。');
+      setIsAuthenticated(false);
+      return;
+    }
+
+    setIsResettingRun(true);
+    setSetupError('');
+    try {
+      const response = await fetch(`${API_BASE_URL}/game/runs/reset-current`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        setSetupError(data.detail || '重置当前局失败，请稍后重试。');
+        return;
+      }
+      await resolveStageByCurrentRun(token);
+    } catch {
+      setSetupError('重置当前局失败，请检查网络后重试。');
+    } finally {
+      setIsResettingRun(false);
+    }
+  };
+
+  let mainContent: JSX.Element = <div className="fixed inset-0 bg-[#f5f5f5]" />;
+  if (isAuthenticated) {
+    if (appStage === 'shopee') {
+      mainContent = <ShopeePage />;
+    } else if (appStage === 'logistics') {
+      mainContent = (
+        <LogisticsClearancePage
+          run={currentRun}
+          currentUser={currentUser}
+          onBackToSetup={handleBackToSetupFromLogistics}
+          onEnterShopee={handleEnterShopeeFromLogistics}
+        />
+      );
+    } else if (appStage === 'intel') {
+      mainContent = (
+        <MarketIntelPage
+          run={currentRun}
+          currentUser={currentUser}
+          onBackToSetup={handleBackToSetupFromIntel}
+          onEnterShopee={handleEnterShopeeFromIntel}
+        />
+      );
+    } else if (appStage === 'setup') {
+      mainContent = (
+        <GameSetupPage
+          isSubmitting={isStartingRun}
+          isResetting={isResettingRun}
+          error={setupError}
+          currentRun={currentRun}
+          currentUser={currentUser}
+          onSubmit={handleCreateRun}
+          onEnterRunningRun={handleEnterRunningRun}
+          onEnterLogistics={handleEnterLogisticsFromSetup}
+          onEnterShopee={handleEnterShopeeFromSetup}
+          onResetCurrentRun={handleResetCurrentRun}
+          onLogout={handleLogout}
+        />
+      );
+    } else {
+      mainContent = (
+        <div className="fixed inset-0 flex items-center justify-center bg-[#f5f5f5] text-sm font-semibold text-slate-500">
+          正在加载你的经营局...
+        </div>
+      );
+    }
+  }
+
   return (
     <>
-      {isAuthenticated ? <ShopeePage /> : <div className="w-screen h-screen bg-[#f5f5f5]" />}
+      {mainContent}
       {!isAuthChecking && (
         <LoginModal
           open={!isAuthenticated}
