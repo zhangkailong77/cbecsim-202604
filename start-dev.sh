@@ -48,4 +48,14 @@ echo "[info] 启动后端..."
 BACKEND_PID=$!
 
 echo "[info] 前后端已启动（Ctrl+C 可一键停止）"
-wait -n "$FRONTEND_PID" "$BACKEND_PID"
+while true; do
+  if ! kill -0 "$FRONTEND_PID" >/dev/null 2>&1; then
+    wait "$FRONTEND_PID" >/dev/null 2>&1 || true
+    break
+  fi
+  if ! kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
+    wait "$BACKEND_PID" >/dev/null 2>&1 || true
+    break
+  fi
+  sleep 1
+done
