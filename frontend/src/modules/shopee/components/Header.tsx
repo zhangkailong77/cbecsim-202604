@@ -101,10 +101,6 @@ export default function Header({
           <button className="hover:text-[#ee4d2d] cursor-pointer">
             <BookOpen size={20} />
           </button>
-          <button className="hover:text-[#ee4d2d] cursor-pointer relative">
-            <Bell size={20} />
-            <span className="absolute -top-1 -right-1 bg-[#ee4d2d] text-white text-[10px] px-1 rounded-full border border-white">99+</span>
-          </button>
         </div>
         
         <div className="h-6 w-[1px] bg-gray-200"></div>

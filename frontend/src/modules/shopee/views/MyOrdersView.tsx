@@ -427,7 +427,6 @@ export default function MyOrdersView({ runId, onOpenOrderDetail }: MyOrdersViewP
               </button>
               <button type="button" className="h-9 px-5 rounded border border-gray-300 text-[14px] text-gray-700 hover:bg-gray-50 relative">
                 出口历史
-                <span className="absolute -top-2 -right-2 min-w-5 h-5 px-1 rounded-full bg-[#ee4d2d] text-white text-[11px] leading-5 text-center">7</span>
               </button>
             </div>
           </div>
