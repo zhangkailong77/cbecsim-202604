@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -501,6 +502,191 @@ def test_procurement_rejects_order_when_quantity_below_minimum():
         },
     )
     assert response.status_code == 422
+
+
+def test_shopee_withdraw_transfers_to_game_cash():
+    from app.db import SessionLocal
+    from app.models import ShopeeFinanceLedgerEntry
+
+    token = _register_or_login_player("13800138105")
+    run = _create_running_run(token)
+
+    bank_resp = client.post(
+        f"/shopee/runs/{run['id']}/finance/bank-accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "bank_name": "马来亚银行",
+            "account_holder": "测试玩家",
+            "account_no": "6222000012345678",
+            "is_default": True,
+        },
+    )
+    assert bank_resp.status_code == 200
+
+    with SessionLocal() as db:
+        db.add(
+            ShopeeFinanceLedgerEntry(
+                run_id=run["id"],
+                user_id=run["user_id"],
+                order_id=None,
+                entry_type="adjustment",
+                direction="in",
+                amount=100,
+                balance_after=100,
+                status="completed",
+                remark="test seed",
+                credited_at=datetime.utcnow(),
+            )
+        )
+        db.commit()
+
+    withdraw_resp = client.post(
+        f"/shopee/runs/{run['id']}/finance/withdraw",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"amount": 50},
+    )
+    assert withdraw_resp.status_code == 200
+    withdraw_body = withdraw_resp.json()
+    assert withdraw_body["withdraw_rm"] == 50
+    assert withdraw_body["credited_rmb"] == 87
+    assert withdraw_body["wallet_balance"] == 50
+    assert withdraw_body["exchange_rate"] == 1.74
+
+    finance_resp = client.get(
+        f"/shopee/runs/{run['id']}/finance/overview",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert finance_resp.status_code == 200
+    assert finance_resp.json()["wallet_balance"] == 50
+
+    summary_resp = client.get(
+        f"/game/runs/{run['id']}/procurement/cart-summary",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert summary_resp.status_code == 200
+    summary = summary_resp.json()
+    assert summary["total_cash"] == 200087
+    assert summary["remaining_cash"] == 200087
+
+
+def test_shopee_withdraw_requires_default_bank_account():
+    from app.db import SessionLocal
+    from app.models import ShopeeFinanceLedgerEntry
+
+    token = _register_or_login_player("13800138106")
+    run = _create_running_run(token)
+
+    bank_resp = client.post(
+        f"/shopee/runs/{run['id']}/finance/bank-accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "bank_name": "马来亚银行",
+            "account_holder": "测试玩家",
+            "account_no": "6222000099990000",
+            "is_default": False,
+        },
+    )
+    assert bank_resp.status_code == 200
+
+    with SessionLocal() as db:
+        db.add(
+            ShopeeFinanceLedgerEntry(
+                run_id=run["id"],
+                user_id=run["user_id"],
+                order_id=None,
+                entry_type="adjustment",
+                direction="in",
+                amount=100,
+                balance_after=100,
+                status="completed",
+                remark="test seed",
+                credited_at=datetime.utcnow(),
+            )
+        )
+        db.commit()
+
+    withdraw_resp = client.post(
+        f"/shopee/runs/{run['id']}/finance/withdraw",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"amount": 50},
+    )
+    assert withdraw_resp.status_code == 400
+    assert "默认银行卡" in withdraw_resp.text
+
+
+def test_game_finance_details_tabs_return_income_and_expense():
+    from app.db import SessionLocal
+    from app.models import ShopeeFinanceLedgerEntry
+
+    token = _register_or_login_player("13800138107")
+    run = _create_running_run(token)
+
+    bank_resp = client.post(
+        f"/shopee/runs/{run['id']}/finance/bank-accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "bank_name": "马来亚银行",
+            "account_holder": "测试玩家",
+            "account_no": "6222000077778888",
+            "is_default": True,
+        },
+    )
+    assert bank_resp.status_code == 200
+
+    with SessionLocal() as db:
+        db.add(
+            ShopeeFinanceLedgerEntry(
+                run_id=run["id"],
+                user_id=run["user_id"],
+                order_id=None,
+                entry_type="adjustment",
+                direction="in",
+                amount=100,
+                balance_after=100,
+                status="completed",
+                remark="test seed",
+                credited_at=datetime.utcnow(),
+            )
+        )
+        db.commit()
+
+    withdraw_resp = client.post(
+        f"/shopee/runs/{run['id']}/finance/withdraw",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"amount": 40},
+    )
+    assert withdraw_resp.status_code == 200
+
+    list_resp = client.get("/market/leaderboard", params={"market": "MY", "page": 1})
+    product = list_resp.json()["items"][0]
+    order_resp = client.post(
+        f"/game/runs/{run['id']}/procurement/orders",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"items": [{"product_id": product["id"], "quantity": 1000}]},
+    )
+    assert order_resp.status_code == 201
+
+    income_resp = client.get(
+        f"/game/runs/{run['id']}/finance/details",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"tab": "income"},
+    )
+    assert income_resp.status_code == 200
+    income_body = income_resp.json()
+    assert income_body["tab"] == "income"
+    assert income_body["total"] >= 1
+    assert income_body["rows"][0]["direction"] == "in"
+
+    expense_resp = client.get(
+        f"/game/runs/{run['id']}/finance/details",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"tab": "expense"},
+    )
+    assert expense_resp.status_code == 200
+    expense_body = expense_resp.json()
+    assert expense_body["tab"] == "expense"
+    assert expense_body["total"] >= 1
+    assert expense_body["rows"][0]["direction"] == "out"
 
 
 def test_shopee_product_draft_flow_and_publish(monkeypatch):

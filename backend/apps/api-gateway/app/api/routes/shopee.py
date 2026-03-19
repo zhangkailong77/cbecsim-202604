@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta
 import json
+import os
 from typing import Any
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ from app.core.security import get_current_user
 from app.db import get_db
 from app.models import (
     GameRun,
+    GameRunCashAdjustment,
     LogisticsShipment,
     OssStorageConfig,
     ShopeeCategoryNode,
@@ -56,6 +58,7 @@ REAL_SECONDS_PER_GAME_DAY = 30 * 60
 REAL_SECONDS_PER_GAME_HOUR = REAL_SECONDS_PER_GAME_DAY / 24
 ORDER_SIM_TICK_GAME_HOURS = 8
 ORDER_INCOME_RELEASE_DELAY_GAME_DAYS = 3
+RM_TO_RMB_RATE = float(os.getenv("RM_TO_RMB_RATE", "1.74"))
 LINE_TRANSIT_DAY_BOUNDS: dict[str, tuple[int, int]] = {
     "economy": (8, 18),
     "standard": (5, 12),
@@ -297,6 +300,20 @@ class ShopeeBankAccountResponse(BaseModel):
 class ShopeeBankAccountsListResponse(BaseModel):
     total: int
     rows: list[ShopeeBankAccountResponse]
+
+
+class ShopeeFinanceWithdrawRequest(BaseModel):
+    amount: float = Field(gt=0, le=100000000)
+
+
+class ShopeeFinanceWithdrawResponse(BaseModel):
+    wallet_balance: float
+    withdraw_rm: float
+    credited_rmb: float
+    exchange_rate: float
+    ledger_id: int
+    cash_adjustment_id: int
+    credited_at: datetime
 
 
 class ShopeeListingRowResponse(BaseModel):
@@ -2402,6 +2419,82 @@ def set_default_shopee_bank_account(
         is_default=bool(row.is_default),
         verify_status=row.verify_status,
         created_at=row.created_at,
+    )
+
+
+@router.post("/runs/{run_id}/finance/withdraw", response_model=ShopeeFinanceWithdrawResponse)
+def withdraw_shopee_wallet_to_game_cash(
+    run_id: int,
+    payload: ShopeeFinanceWithdrawRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> ShopeeFinanceWithdrawResponse:
+    user_id = int(current_user["id"])
+    run = _get_owned_running_run_or_404(db, run_id, user_id)
+    current_tick = _resolve_game_tick(db, run.id, user_id)
+    _backfill_income_for_completed_orders(db, run_id=run.id, user_id=user_id, current_tick=current_tick)
+
+    default_bank = (
+        db.query(ShopeeBankAccount)
+        .filter(
+            ShopeeBankAccount.run_id == run.id,
+            ShopeeBankAccount.user_id == user_id,
+            ShopeeBankAccount.is_default.is_(True),
+        )
+        .order_by(ShopeeBankAccount.id.desc())
+        .first()
+    )
+    if not default_bank:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请先设置默认银行卡后再提现")
+
+    withdraw_rm = round(float(payload.amount or 0), 2)
+    if withdraw_rm <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="提现金额必须大于 0")
+
+    wallet_balance = _calc_wallet_balance(db, run_id=run.id, user_id=user_id)
+    if withdraw_rm > wallet_balance:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"余额不足，当前可提现 {wallet_balance:.2f} RM")
+
+    credited_rmb = round(withdraw_rm * RM_TO_RMB_RATE, 2)
+    balance_after = round(wallet_balance - withdraw_rm, 2)
+
+    ledger = ShopeeFinanceLedgerEntry(
+        run_id=run.id,
+        user_id=user_id,
+        order_id=None,
+        entry_type="withdrawal",
+        direction="out",
+        amount=withdraw_rm,
+        balance_after=balance_after,
+        status="completed",
+        remark=f"提现至工作台（汇率 1:{RM_TO_RMB_RATE:.2f}）",
+        credited_at=current_tick,
+    )
+    db.add(ledger)
+    db.flush()
+
+    adjustment = GameRunCashAdjustment(
+        run_id=run.id,
+        user_id=user_id,
+        source="shopee_withdrawal",
+        direction="in",
+        amount=credited_rmb,
+        remark=f"Shopee 提现转入，银行卡 {default_bank.bank_name}（{default_bank.account_no_masked}）",
+        related_ledger_id=ledger.id,
+    )
+    db.add(adjustment)
+    db.commit()
+    db.refresh(ledger)
+    db.refresh(adjustment)
+
+    return ShopeeFinanceWithdrawResponse(
+        wallet_balance=balance_after,
+        withdraw_rm=withdraw_rm,
+        credited_rmb=credited_rmb,
+        exchange_rate=round(RM_TO_RMB_RATE, 4),
+        ledger_id=ledger.id,
+        cash_adjustment_id=adjustment.id,
+        credited_at=current_tick,
     )
 
 

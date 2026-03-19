@@ -55,6 +55,16 @@ interface BankAccountsResponse {
   rows: BankAccountRow[];
 }
 
+interface WithdrawResponse {
+  wallet_balance: number;
+  withdraw_rm: number;
+  credited_rmb: number;
+  exchange_rate: number;
+  ledger_id: number;
+  cash_adjustment_id: number;
+  credited_at: string;
+}
+
 function formatMoney(amount: number) {
   return `RM ${Number(amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
@@ -98,12 +108,24 @@ export default function MyBalanceView({ runId, onOpenBankAccounts }: MyBalanceVi
   const [pageSize] = useState(20);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [showWithdrawModal, setShowWithdrawModal] = useState(false);
+  const [withdrawAmount, setWithdrawAmount] = useState('');
+  const [withdrawSubmitting, setWithdrawSubmitting] = useState(false);
+  const [withdrawError, setWithdrawError] = useState('');
 
   const token = useMemo(() => localStorage.getItem(ACCESS_TOKEN_KEY), []);
 
-  const authedFetch = async <T,>(url: string): Promise<T> => {
+  const authedFetch = async <T,>(url: string, init?: RequestInit): Promise<T> => {
     if (!token) throw new Error('missing token');
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    const nextHeaders: Record<string, string> = { Authorization: `Bearer ${token}` };
+    if (init?.body !== undefined) nextHeaders['Content-Type'] = 'application/json';
+    const res = await fetch(url, {
+      ...init,
+      headers: {
+        ...nextHeaders,
+        ...(init?.headers || {}),
+      },
+    });
     if (!res.ok) throw new Error(await res.text());
     return res.json() as Promise<T>;
   };
@@ -142,6 +164,47 @@ export default function MyBalanceView({ runId, onOpenBankAccounts }: MyBalanceVi
     setDefaultBank(selected);
   };
 
+  const withdrawPreviewRmb = useMemo(() => {
+    const num = Number(withdrawAmount || 0);
+    if (!Number.isFinite(num) || num <= 0) return 0;
+    return Number((num * 1.74).toFixed(2));
+  }, [withdrawAmount]);
+
+  const handleSubmitWithdraw = async () => {
+    if (!runId) return;
+    const amount = Number(withdrawAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setWithdrawError('请输入大于 0 的提现金额');
+      return;
+    }
+    if ((overview?.wallet_balance ?? 0) <= 0) {
+      setWithdrawError('当前余额不足，无法提现');
+      return;
+    }
+    if (amount > (overview?.wallet_balance ?? 0)) {
+      setWithdrawError('提现金额不能超过当前可提现余额');
+      return;
+    }
+
+    setWithdrawSubmitting(true);
+    setWithdrawError('');
+    try {
+      await authedFetch<WithdrawResponse>(`${API_BASE_URL}/shopee/runs/${runId}/finance/withdraw`, {
+        method: 'POST',
+        body: JSON.stringify({ amount: Number(amount.toFixed(2)) }),
+      });
+      setShowWithdrawModal(false);
+      setWithdrawAmount('');
+      await Promise.all([loadOverview(), loadRows()]);
+      alert('提现成功，已转入工作台资金。');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '提现失败，请稍后重试';
+      setWithdrawError(message);
+    } finally {
+      setWithdrawSubmitting(false);
+    }
+  };
+
   useEffect(() => {
     void loadOverview();
     void loadDefaultBank();
@@ -163,7 +226,16 @@ export default function MyBalanceView({ runId, onOpenBankAccounts }: MyBalanceVi
               <div className="text-[14px] text-gray-600">钱包余额</div>
               <div className="mt-2 flex items-center gap-4">
                 <div className="text-[38px] font-semibold text-[#2f2f2f]">{formatMoney(overview?.wallet_balance ?? 0)}</div>
-                <button type="button" className="h-8 rounded bg-[#ee4d2d] px-4 text-[13px] text-white">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowWithdrawModal(true);
+                    setWithdrawAmount('');
+                    setWithdrawError('');
+                  }}
+                  className="h-8 rounded bg-[#ee4d2d] px-4 text-[13px] text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={!defaultBank || (overview?.wallet_balance ?? 0) <= 0}
+                >
                   提现
                 </button>
               </div>
@@ -388,6 +460,74 @@ export default function MyBalanceView({ runId, onOpenBankAccounts }: MyBalanceVi
           </div>
         </section>
       </div>
+
+      {showWithdrawModal && (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-[460px] rounded-xl bg-white p-5">
+            <div className="flex items-center justify-between">
+              <h3 className="text-[18px] font-semibold text-[#2f2f2f]">提现到工作台</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  if (withdrawSubmitting) return;
+                  setShowWithdrawModal(false);
+                }}
+                className="text-[20px] leading-none text-gray-400"
+              >
+                ×
+              </button>
+            </div>
+            <div className="mt-4 space-y-3 text-[13px]">
+              <div className="rounded border border-gray-200 bg-gray-50 px-3 py-2">
+                <div className="text-gray-500">默认银行卡</div>
+                <div className="mt-1 text-[#2f2f2f]">
+                  {defaultBank ? `${defaultBank.bank_name}（${defaultBank.account_no_masked}）` : '未设置默认银行卡'}
+                </div>
+              </div>
+              <div className="flex items-center justify-between rounded border border-gray-200 px-3 py-2">
+                <span className="text-gray-500">可提现余额</span>
+                <span className="font-semibold text-[#2f2f2f]">{formatMoney(overview?.wallet_balance ?? 0)}</span>
+              </div>
+              <div>
+                <label className="mb-1 block text-gray-600">提现金额（RM）</label>
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={withdrawAmount}
+                  onChange={(event) => setWithdrawAmount(event.target.value)}
+                  placeholder="请输入提现金额"
+                  className="h-10 w-full rounded border border-gray-200 px-3 outline-none focus:border-[#ee4d2d]"
+                />
+              </div>
+              <div className="flex items-center justify-between rounded border border-gray-200 bg-[#fff7f4] px-3 py-2">
+                <span className="text-gray-500">预计转入工作台</span>
+                <span className="font-semibold text-[#ee4d2d]">RMB {withdrawPreviewRmb.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+              </div>
+              <div className="text-[12px] text-gray-500">汇率：1 RM = 1.74 RMB</div>
+              {withdrawError && <div className="rounded border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] text-rose-600">{withdrawError}</div>}
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowWithdrawModal(false)}
+                disabled={withdrawSubmitting}
+                className="h-9 rounded border border-gray-200 px-4 text-[13px] text-gray-700 disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSubmitWithdraw()}
+                disabled={withdrawSubmitting || !defaultBank}
+                className="h-9 rounded bg-[#ee4d2d] px-4 text-[13px] text-white disabled:opacity-50"
+              >
+                {withdrawSubmitting ? '提交中...' : '确认提现'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

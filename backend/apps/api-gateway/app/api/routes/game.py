@@ -11,6 +11,7 @@ from app.core.security import get_current_user
 from app.db import get_db
 from app.models import (
     GameRun,
+    GameRunCashAdjustment,
     InventoryLot,
     LogisticsShipment,
     LogisticsShipmentOrder,
@@ -56,11 +57,33 @@ class CurrentRunResponse(BaseModel):
 
 class ProcurementSummaryResponse(BaseModel):
     run_id: int
-    total_cash: int
+    initial_cash: float
+    income_withdrawal_total: float
+    total_expense: float
+    current_balance: float
+    total_cash: float
     spent_total: int
     logistics_spent_total: int
     warehouse_spent_total: int
-    remaining_cash: int
+    remaining_cash: float
+
+
+class GameFinanceDetailRowResponse(BaseModel):
+    id: str
+    direction: str
+    type: str
+    type_label: str
+    amount: float
+    created_at: datetime
+    remark: str | None = None
+
+
+class GameFinanceDetailsResponse(BaseModel):
+    tab: str
+    page: int
+    page_size: int
+    total: int
+    rows: list[GameFinanceDetailRowResponse]
 
 
 class ProcurementOrderItemPayload(BaseModel):
@@ -95,7 +118,7 @@ class ProcurementCreateOrderResponse(BaseModel):
     order_id: int
     total_amount: int
     spent_total: int
-    remaining_cash: int
+    remaining_cash: float
 
 
 class LogisticsCreateShipmentRequest(BaseModel):
@@ -130,7 +153,7 @@ class LogisticsCreateShipmentResponse(BaseModel):
     spent_total: int
     logistics_spent_total: int
     warehouse_spent_total: int
-    remaining_cash: int
+    remaining_cash: float
 
 
 class WarehouseInboundCandidateItem(BaseModel):
@@ -188,7 +211,7 @@ class WarehouseStrategyResponse(BaseModel):
 
 class WarehouseCreateStrategyResponse(BaseModel):
     strategy: WarehouseStrategyResponse
-    remaining_cash: int
+    remaining_cash: float
 
 
 class WarehouseInboundRequest(BaseModel):
@@ -200,7 +223,7 @@ class WarehouseInboundResponse(BaseModel):
     inbound_count: int
     shipment_ids: list[int]
     inventory_lot_count: int
-    remaining_cash: int
+    remaining_cash: float
 
 
 class WarehouseSummaryResponse(BaseModel):
@@ -557,6 +580,157 @@ def _calc_run_warehouse_spent(db: Session, run_id: int) -> int:
     return int(spent or 0)
 
 
+def _calc_run_cash_adjustment_in(db: Session, run_id: int) -> float:
+    amount = (
+        db.query(func.coalesce(func.sum(GameRunCashAdjustment.amount), 0.0))
+        .filter(
+            GameRunCashAdjustment.run_id == run_id,
+            GameRunCashAdjustment.direction == "in",
+        )
+        .scalar()
+        or 0.0
+    )
+    return round(float(amount), 2)
+
+
+def _calc_run_withdrawal_income_total(db: Session, run_id: int) -> float:
+    amount = (
+        db.query(func.coalesce(func.sum(GameRunCashAdjustment.amount), 0.0))
+        .filter(
+            GameRunCashAdjustment.run_id == run_id,
+            GameRunCashAdjustment.direction == "in",
+            GameRunCashAdjustment.source == "shopee_withdrawal",
+        )
+        .scalar()
+        or 0.0
+    )
+    return round(float(amount), 2)
+
+
+def _calc_run_cash_adjustment_out(db: Session, run_id: int) -> float:
+    amount = (
+        db.query(func.coalesce(func.sum(GameRunCashAdjustment.amount), 0.0))
+        .filter(
+            GameRunCashAdjustment.run_id == run_id,
+            GameRunCashAdjustment.direction == "out",
+        )
+        .scalar()
+        or 0.0
+    )
+    return round(float(amount), 2)
+
+
+def _calc_run_total_cash(db: Session, run: GameRun) -> float:
+    adjustment_in = _calc_run_cash_adjustment_in(db, run.id)
+    adjustment_out = _calc_run_cash_adjustment_out(db, run.id)
+    return round(float(run.initial_cash) + adjustment_in - adjustment_out, 2)
+
+
+def _calc_run_remaining_cash(
+    db: Session,
+    run: GameRun,
+    *,
+    procurement_spent_total: int,
+    logistics_spent_total: int,
+    warehouse_spent_total: int,
+) -> float:
+    total_cash = _calc_run_total_cash(db, run)
+    remaining = total_cash - float(procurement_spent_total) - float(logistics_spent_total) - float(warehouse_spent_total)
+    return round(max(0.0, remaining), 2)
+
+
+def _list_run_income_detail_rows(db: Session, run_id: int) -> list[GameFinanceDetailRowResponse]:
+    rows = (
+        db.query(GameRunCashAdjustment)
+        .filter(
+            GameRunCashAdjustment.run_id == run_id,
+            GameRunCashAdjustment.direction == "in",
+            GameRunCashAdjustment.source == "shopee_withdrawal",
+        )
+        .order_by(GameRunCashAdjustment.created_at.desc(), GameRunCashAdjustment.id.desc())
+        .all()
+    )
+    return [
+        GameFinanceDetailRowResponse(
+            id=f"cash_adj:{row.id}",
+            direction="in",
+            type="withdrawal_transfer",
+            type_label="提现转入",
+            amount=round(float(row.amount or 0), 2),
+            created_at=row.created_at,
+            remark=row.remark,
+        )
+        for row in rows
+    ]
+
+
+def _list_run_expense_detail_rows(db: Session, run_id: int) -> list[GameFinanceDetailRowResponse]:
+    procurement_rows = (
+        db.query(ProcurementOrder)
+        .filter(ProcurementOrder.run_id == run_id)
+        .order_by(ProcurementOrder.created_at.desc(), ProcurementOrder.id.desc())
+        .all()
+    )
+    logistics_rows = (
+        db.query(LogisticsShipment)
+        .filter(LogisticsShipment.run_id == run_id)
+        .order_by(LogisticsShipment.created_at.desc(), LogisticsShipment.id.desc())
+        .all()
+    )
+    warehouse_rows = (
+        db.query(WarehouseStrategy)
+        .filter(WarehouseStrategy.run_id == run_id)
+        .order_by(WarehouseStrategy.created_at.desc(), WarehouseStrategy.id.desc())
+        .all()
+    )
+
+    merged: list[GameFinanceDetailRowResponse] = []
+    merged.extend(
+        [
+            GameFinanceDetailRowResponse(
+                id=f"procurement:{row.id}",
+                direction="out",
+                type="procurement",
+                type_label="采购支出",
+                amount=round(float(row.total_amount or 0), 2),
+                created_at=row.created_at,
+                remark=f"采购单 #{row.id}",
+            )
+            for row in procurement_rows
+        ]
+    )
+    merged.extend(
+        [
+            GameFinanceDetailRowResponse(
+                id=f"logistics:{row.id}",
+                direction="out",
+                type="logistics",
+                type_label="物流支出",
+                amount=round(float(row.total_fee or 0), 2),
+                created_at=row.created_at,
+                remark=f"物流单 #{row.id}",
+            )
+            for row in logistics_rows
+        ]
+    )
+    merged.extend(
+        [
+            GameFinanceDetailRowResponse(
+                id=f"warehouse:{row.id}",
+                direction="out",
+                type="warehouse",
+                type_label="仓储支出",
+                amount=round(float(row.total_cost or 0), 2),
+                created_at=row.created_at,
+                remark=f"仓储策略 #{row.id}",
+            )
+            for row in warehouse_rows
+        ]
+    )
+    merged.sort(key=lambda item: (item.created_at, item.id), reverse=True)
+    return merged
+
+
 def _warehouse_mode_options() -> dict[str, dict]:
     return {
         "official": {
@@ -720,14 +894,59 @@ def get_procurement_cart_summary(
     spent_total = _calc_run_procurement_spent(db, run.id)
     logistics_spent_total = _calc_run_logistics_spent(db, run.id)
     warehouse_spent_total = _calc_run_warehouse_spent(db, run.id)
-    remaining_cash = max(0, run.initial_cash - spent_total - logistics_spent_total - warehouse_spent_total)
+    income_withdrawal_total = _calc_run_withdrawal_income_total(db, run.id)
+    total_expense = float(spent_total + logistics_spent_total + warehouse_spent_total)
+    total_cash = _calc_run_total_cash(db, run)
+    remaining_cash = _calc_run_remaining_cash(
+        db,
+        run,
+        procurement_spent_total=spent_total,
+        logistics_spent_total=logistics_spent_total,
+        warehouse_spent_total=warehouse_spent_total,
+    )
     return ProcurementSummaryResponse(
         run_id=run.id,
-        total_cash=run.initial_cash,
+        initial_cash=float(run.initial_cash),
+        income_withdrawal_total=income_withdrawal_total,
+        total_expense=round(total_expense, 2),
+        current_balance=remaining_cash,
+        total_cash=total_cash,
         spent_total=spent_total,
         logistics_spent_total=logistics_spent_total,
         warehouse_spent_total=warehouse_spent_total,
         remaining_cash=remaining_cash,
+    )
+
+
+@router.get("/runs/{run_id}/finance/details", response_model=GameFinanceDetailsResponse)
+def list_run_finance_details(
+    run_id: int,
+    tab: str = Query(default="income"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=50),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> GameFinanceDetailsResponse:
+    run = _get_owned_running_run_or_404(db, run_id=run_id, user_id=current_user["id"])
+    normalized_tab = (tab or "income").strip().lower()
+    if normalized_tab not in {"income", "expense"}:
+        normalized_tab = "income"
+
+    if normalized_tab == "income":
+        all_rows = _list_run_income_detail_rows(db, run.id)
+    else:
+        all_rows = _list_run_expense_detail_rows(db, run.id)
+
+    total = len(all_rows)
+    start = (page - 1) * page_size
+    end = start + page_size
+    rows = all_rows[start:end]
+    return GameFinanceDetailsResponse(
+        tab=normalized_tab,
+        page=page,
+        page_size=page_size,
+        total=total,
+        rows=rows,
     )
 
 
@@ -804,11 +1023,17 @@ def create_procurement_order(
     spent_total = _calc_run_procurement_spent(db, run.id)
     logistics_spent_total = _calc_run_logistics_spent(db, run.id)
     warehouse_spent_total = _calc_run_warehouse_spent(db, run.id)
-    remaining_cash = run.initial_cash - spent_total - logistics_spent_total - warehouse_spent_total
+    remaining_cash = _calc_run_remaining_cash(
+        db,
+        run,
+        procurement_spent_total=spent_total,
+        logistics_spent_total=logistics_spent_total,
+        warehouse_spent_total=warehouse_spent_total,
+    )
     if order_total > remaining_cash:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Insufficient cash balance, remaining {max(0, remaining_cash)}",
+            detail=f"Insufficient cash balance, remaining {remaining_cash}",
         )
 
     order = ProcurementOrder(
@@ -839,7 +1064,13 @@ def create_procurement_order(
         order_id=order.id,
         total_amount=order_total,
         spent_total=updated_spent,
-        remaining_cash=max(0, run.initial_cash - updated_spent - logistics_spent_total - warehouse_spent_total),
+        remaining_cash=_calc_run_remaining_cash(
+            db,
+            run,
+            procurement_spent_total=updated_spent,
+            logistics_spent_total=logistics_spent_total,
+            warehouse_spent_total=warehouse_spent_total,
+        ),
     )
 
 
@@ -937,11 +1168,17 @@ def create_logistics_shipment(
     procurement_spent_total = _calc_run_procurement_spent(db, run.id)
     logistics_spent_total = _calc_run_logistics_spent(db, run.id)
     warehouse_spent_total = _calc_run_warehouse_spent(db, run.id)
-    remaining_cash = run.initial_cash - procurement_spent_total - logistics_spent_total - warehouse_spent_total
+    remaining_cash = _calc_run_remaining_cash(
+        db,
+        run,
+        procurement_spent_total=procurement_spent_total,
+        logistics_spent_total=logistics_spent_total,
+        warehouse_spent_total=warehouse_spent_total,
+    )
     if total_fee > remaining_cash:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Insufficient cash balance, remaining {max(0, remaining_cash)}",
+            detail=f"Insufficient cash balance, remaining {remaining_cash}",
         )
 
     shipment = LogisticsShipment(
@@ -982,7 +1219,13 @@ def create_logistics_shipment(
         spent_total=procurement_spent_total,
         logistics_spent_total=updated_logistics_spent,
         warehouse_spent_total=warehouse_spent_total,
-        remaining_cash=max(0, run.initial_cash - procurement_spent_total - updated_logistics_spent - warehouse_spent_total),
+        remaining_cash=_calc_run_remaining_cash(
+            db,
+            run,
+            procurement_spent_total=procurement_spent_total,
+            logistics_spent_total=updated_logistics_spent,
+            warehouse_spent_total=warehouse_spent_total,
+        ),
     )
 
 
@@ -1138,11 +1381,17 @@ def create_warehouse_strategy(
     procurement_spent_total = _calc_run_procurement_spent(db, run.id)
     logistics_spent_total = _calc_run_logistics_spent(db, run.id)
     warehouse_spent_total = _calc_run_warehouse_spent(db, run.id)
-    remaining_cash = run.initial_cash - procurement_spent_total - logistics_spent_total - warehouse_spent_total
+    remaining_cash = _calc_run_remaining_cash(
+        db,
+        run,
+        procurement_spent_total=procurement_spent_total,
+        logistics_spent_total=logistics_spent_total,
+        warehouse_spent_total=warehouse_spent_total,
+    )
     if total_cost > remaining_cash:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Insufficient cash balance, remaining {max(0, remaining_cash)}",
+            detail=f"Insufficient cash balance, remaining {remaining_cash}",
         )
 
     strategy = WarehouseStrategy(
@@ -1166,7 +1415,13 @@ def create_warehouse_strategy(
 
     return WarehouseCreateStrategyResponse(
         strategy=_to_warehouse_strategy_response(strategy),
-        remaining_cash=max(0, remaining_cash - total_cost),
+        remaining_cash=_calc_run_remaining_cash(
+            db,
+            run,
+            procurement_spent_total=procurement_spent_total,
+            logistics_spent_total=logistics_spent_total,
+            warehouse_spent_total=warehouse_spent_total + total_cost,
+        ),
     )
 
 
@@ -1256,7 +1511,13 @@ def warehouse_inbound(
     procurement_spent_total = _calc_run_procurement_spent(db, run.id)
     logistics_spent_total = _calc_run_logistics_spent(db, run.id)
     warehouse_spent_total = _calc_run_warehouse_spent(db, run.id)
-    remaining_cash = max(0, run.initial_cash - procurement_spent_total - logistics_spent_total - warehouse_spent_total)
+    remaining_cash = _calc_run_remaining_cash(
+        db,
+        run,
+        procurement_spent_total=procurement_spent_total,
+        logistics_spent_total=logistics_spent_total,
+        warehouse_spent_total=warehouse_spent_total,
+    )
 
     return WarehouseInboundResponse(
         inbound_count=created_inbound_count,

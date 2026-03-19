@@ -90,6 +90,7 @@ class GameRun(Base):
     shopee_order_logistics_events = relationship("ShopeeOrderLogisticsEvent", back_populates="run")
     shopee_order_settlements = relationship("ShopeeOrderSettlement", back_populates="run")
     shopee_finance_ledger_entries = relationship("ShopeeFinanceLedgerEntry", back_populates="run")
+    cash_adjustments = relationship("GameRunCashAdjustment", back_populates="run")
     shopee_bank_accounts = relationship("ShopeeBankAccount", back_populates="run")
     shopee_order_generation_logs = relationship("ShopeeOrderGenerationLog", back_populates="run")
 
@@ -698,6 +699,26 @@ class ShopeeFinanceLedgerEntry(Base):
 
     run = relationship("GameRun", back_populates="shopee_finance_ledger_entries")
     order = relationship("ShopeeOrder", back_populates="finance_ledger_entries")
+
+
+class GameRunCashAdjustment(Base):
+    __tablename__ = "game_run_cash_adjustments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("game_runs.id"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, index=True, default="manual_adjustment")
+    direction: Mapped[str] = mapped_column(String(8), nullable=False, index=True, default="in")
+    amount: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    remark: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    related_ledger_id: Mapped[int | None] = mapped_column(ForeignKey("shopee_finance_ledger_entries.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    run = relationship("GameRun", back_populates="cash_adjustments")
 
 
 class ShopeeBankAccount(Base):

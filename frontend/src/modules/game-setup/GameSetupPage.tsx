@@ -76,10 +76,33 @@ interface GameSetupPageProps {
 }
 
 interface ProcurementSummary {
+  initial_cash: number;
+  income_withdrawal_total: number;
+  total_expense: number;
+  current_balance: number;
   total_cash: number;
   spent_total: number;
   logistics_spent_total: number;
   remaining_cash: number;
+  warehouse_spent_total: number;
+}
+
+interface GameFinanceDetailRow {
+  id: string;
+  direction: 'in' | 'out';
+  type: string;
+  type_label: string;
+  amount: number;
+  created_at: string;
+  remark: string | null;
+}
+
+interface GameFinanceDetailsResponse {
+  tab: 'income' | 'expense';
+  page: number;
+  page_size: number;
+  total: number;
+  rows: GameFinanceDetailRow[];
 }
 
 interface ShipmentApi {
@@ -123,7 +146,8 @@ const MARKET_OPTIONS = [
   { code: 'TH', name: '泰国', enabled: false, note: 'DLC 即将开放' },
 ];
 
-const fmtMoney = (n: number) => `${Math.max(0, Math.round(n)).toLocaleString()} RMB`;
+const fmtMoney = (n: number) =>
+  `${Math.max(0, Number(n || 0)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} RMB`;
 
 function fmtDurationSeconds(totalSeconds: number) {
   const s = Math.max(0, Math.floor(totalSeconds));
@@ -184,6 +208,23 @@ function getGameClockLabel(elapsedSeconds: number) {
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`;
 }
 
+function getGameDayClockFromTimestamps(runCreatedAt: string, eventAt: string) {
+  const runMs = parseServerDateMs(runCreatedAt);
+  const eventMs = parseServerDateMs(eventAt);
+  const elapsedSeconds = Math.max(0, Math.floor((eventMs - runMs) / 1000));
+  const gameDayFloat = (elapsedSeconds / TOTAL_REAL_SECONDS) * TOTAL_GAME_DAYS + 1;
+  const dayIndex = Math.min(TOTAL_GAME_DAYS, Math.max(1, Math.floor(gameDayFloat)));
+  const frac = gameDayFloat - Math.floor(gameDayFloat);
+  const secOfDay = Math.max(0, Math.floor(frac * 24 * 60 * 60));
+  const hour = Math.floor(secOfDay / 3600) % 24;
+  const minute = Math.floor((secOfDay % 3600) / 60);
+  const second = secOfDay % 60;
+  return {
+    dayText: `Day ${dayIndex}`,
+    clockText: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`,
+  };
+}
+
 function calcShipmentRuntime(shipment: LocalShipment, nowMs: number) {
   const createdMs = parseServerDateMs(shipment.createdAt);
   const elapsedSeconds = Math.max(0, Math.floor((nowMs - createdMs) / 1000));
@@ -231,6 +272,10 @@ export default function GameSetupPage({
   const [procurementSummary, setProcurementSummary] = useState<ProcurementSummary | null>(null);
   const [latestShipment, setLatestShipment] = useState<LocalShipment | null>(null);
   const [warehouseSummary, setWarehouseSummary] = useState<WarehouseSummaryResp | null>(null);
+  const [financeTab, setFinanceTab] = useState<'income' | 'expense'>('income');
+  const [financeRows, setFinanceRows] = useState<GameFinanceDetailRow[]>([]);
+  const [financeTotal, setFinanceTotal] = useState(0);
+  const [financeLoading, setFinanceLoading] = useState(false);
   const [stageDeadlineMs, setStageDeadlineMs] = useState<number | null>(null);
   const [activeMenu, setActiveMenu] = useState<'overview' | 'run-data' | 'finance' | 'history' | 'buyer-pool'>('overview');
   const [showPlayerPanel, setShowPlayerPanel] = useState(false);
@@ -253,6 +298,11 @@ export default function GameSetupPage({
   const canEnterAdminBuyerPool =
     (currentUser?.role || '').trim() === 'super_admin' &&
     (currentUser?.username || '').trim().toLowerCase() === 'yzcube';
+  const displayCurrentBalance = procurementSummary?.current_balance ?? procurementSummary?.remaining_cash ?? lockedInitialCash;
+  const displayWithdrawalIncome = procurementSummary?.income_withdrawal_total ?? 0;
+  const displayTotalExpense = procurementSummary?.total_expense ?? (procurementSummary
+    ? (procurementSummary.spent_total + procurementSummary.logistics_spent_total + (procurementSummary.warehouse_spent_total ?? 0))
+    : 0);
 
   useEffect(() => {
     if (setupSubView === 'admin-buyer-pool' && canEnterAdminBuyerPool) {
@@ -370,6 +420,32 @@ export default function GameSetupPage({
     };
     void loadSetupData();
   }, [currentRun?.id]);
+
+  useEffect(() => {
+    const loadFinanceDetails = async () => {
+      if (!currentRun?.id) {
+        setFinanceRows([]);
+        setFinanceTotal(0);
+        return;
+      }
+      const token = localStorage.getItem(ACCESS_TOKEN_KEY);
+      if (!token) return;
+      setFinanceLoading(true);
+      try {
+        const resp = await fetch(
+          `${API_BASE_URL}/game/runs/${currentRun.id}/finance/details?tab=${financeTab}&page=1&page_size=8`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (!resp.ok) return;
+        const data = (await resp.json()) as GameFinanceDetailsResponse;
+        setFinanceRows(data.rows ?? []);
+        setFinanceTotal(data.total ?? 0);
+      } finally {
+        setFinanceLoading(false);
+      }
+    };
+    void loadFinanceDetails();
+  }, [currentRun?.id, financeTab]);
 
   const sidebarUsingAdminRun = activeMenu === 'buyer-pool' && !!adminSelectedRunContext?.runId;
   const timelineCreatedAt = sidebarUsingAdminRun
@@ -620,7 +696,7 @@ export default function GameSetupPage({
                       <div className="rounded-2xl border border-[#e5ecfb] bg-white p-4">
                         <div className="mb-3 flex items-center justify-between">
                           <h3 className="text-[18px] font-black text-slate-800">Step 01 开局信息</h3>
-                          <div className="rounded-full bg-blue-50 px-3 py-1 text-[12px] font-bold text-blue-700">总资金 {fmtMoney(lockedInitialCash)}</div>
+                          <div className="rounded-full bg-blue-50 px-3 py-1 text-[12px] font-bold text-blue-700">当前可用余额 {fmtMoney(displayCurrentBalance)}</div>
                         </div>
 
                         {hasRunningRun ? (
@@ -792,9 +868,10 @@ export default function GameSetupPage({
                   <div className="rounded-2xl border border-[#e5ecfb] bg-white p-4">
                     <div className="mb-2 text-[15px] font-black text-slate-800">阶段总览数据</div>
                     <div className="space-y-2 text-[13px]">
-                      <OverviewRow label="总资金" value={fmtMoney(lockedInitialCash)} />
-                      <OverviewRow label="已采购" value={fmtMoney(procurementSummary?.spent_total ?? 0)} />
-                      <OverviewRow label="采购剩余" value={fmtMoney(procurementSummary?.remaining_cash ?? lockedInitialCash)} />
+                      <OverviewRow label="期初资金" value={fmtMoney(procurementSummary?.initial_cash ?? lockedInitialCash)} />
+                      <OverviewRow label="累计收入（仅提现转入）" value={fmtMoney(displayWithdrawalIncome)} />
+                      <OverviewRow label="累计支出（采购/物流/仓储）" value={fmtMoney(displayTotalExpense)} />
+                      <OverviewRow label="当前可用余额" value={fmtMoney(displayCurrentBalance)} />
                       <OverviewRow label="目标市场" value={lockedMarket} />
                       {sidebarUsingAdminRun && (
                         <OverviewRow
@@ -802,6 +879,50 @@ export default function GameSetupPage({
                           value={`#${adminSelectedRunContext?.runId ?? '--'} · ${adminSelectedRunContext?.status ?? '--'}`}
                         />
                       )}
+                    </div>
+                    <div className="mt-3 border-t border-[#e5ecfb] pt-3">
+                      <div className="mb-2 inline-flex rounded-lg border border-[#dbeafe] bg-[#f8fbff] p-1 text-[12px]">
+                        <button
+                          type="button"
+                          onClick={() => setFinanceTab('income')}
+                          className={`rounded-md px-3 py-1.5 font-semibold ${financeTab === 'income' ? 'bg-[#2563eb] text-white' : 'text-slate-600'}`}
+                        >
+                          收入明细
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setFinanceTab('expense')}
+                          className={`rounded-md px-3 py-1.5 font-semibold ${financeTab === 'expense' ? 'bg-[#2563eb] text-white' : 'text-slate-600'}`}
+                        >
+                          支出明细
+                        </button>
+                      </div>
+                      <div className="mb-2 text-[11px] text-slate-500">最近 {Math.min(financeRows.length, 8)} 条（共 {financeTotal} 条，时间按游戏日）</div>
+                      <div className="space-y-1.5">
+                        {financeLoading && <div className="rounded-md bg-slate-50 px-2 py-2 text-[12px] text-slate-500">加载中...</div>}
+                        {!financeLoading && financeRows.length === 0 && (
+                          <div className="rounded-md bg-slate-50 px-2 py-2 text-[12px] text-slate-500">暂无明细</div>
+                        )}
+                        {!financeLoading &&
+                          financeRows.map((row) => {
+                            const ts = currentRun?.created_at ? getGameDayClockFromTimestamps(currentRun.created_at, row.created_at) : null;
+                            return (
+                              <div key={row.id} className="rounded-md border border-slate-100 bg-slate-50 px-2 py-2">
+                                <div className="flex items-center justify-between text-[12px]">
+                                  <span className="font-semibold text-slate-700">{row.type_label}</span>
+                                  <span className={`font-bold ${row.direction === 'in' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                                    {row.direction === 'in' ? '+' : '-'}
+                                    {fmtMoney(row.amount)}
+                                  </span>
+                                </div>
+                                <div className="mt-1 flex items-center justify-between text-[11px] text-slate-500">
+                                  <span>{ts ? `${ts.dayText} ${ts.clockText}` : '-'}</span>
+                                  <span className="truncate pl-2">{row.remark || '-'}</span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                      </div>
                     </div>
                   </div>
 
