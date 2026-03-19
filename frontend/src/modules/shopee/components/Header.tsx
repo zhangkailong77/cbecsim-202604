@@ -7,8 +7,10 @@ interface HeaderProps {
   runId: number | null;
   onBackToSetup: () => void;
   onBackToDashboard: () => void;
-  onNavigateToView: (view: 'dashboard' | 'my-orders' | 'my-products' | 'new-product') => void;
-  activeView: 'dashboard' | 'my-orders' | 'my-products' | 'new-product';
+  onNavigateToView: (view: 'dashboard' | 'my-orders' | 'my-products' | 'new-product' | 'my-income' | 'my-balance' | 'bank-accounts') => void;
+  activeView: 'dashboard' | 'my-orders' | 'my-products' | 'new-product' | 'my-income' | 'my-balance' | 'bank-accounts';
+  isOrderDetail?: boolean;
+  isProductDetail?: boolean;
 }
 
 export default function Header({
@@ -18,6 +20,8 @@ export default function Header({
   onBackToDashboard,
   onNavigateToView,
   activeView,
+  isOrderDetail = false,
+  isProductDetail = false,
 }: HeaderProps) {
   const renderBreadcrumb = () => {
     if (activeView === 'dashboard') return null;
@@ -28,6 +32,12 @@ export default function Header({
           <button type="button" onClick={() => onNavigateToView('my-orders')} className="text-gray-700 hover:text-[#ee4d2d]">
             我的订单
           </button>
+          {isOrderDetail && (
+            <>
+              <span className="text-gray-300">{'>'}</span>
+              <span className="text-gray-700">订单详情</span>
+            </>
+          )}
         </div>
       );
     }
@@ -41,6 +51,20 @@ export default function Header({
         </div>
       );
     }
+    if (activeView === 'my-income' || activeView === 'my-balance' || activeView === 'bank-accounts') {
+      return (
+        <div className="flex items-center gap-2 text-[14px]">
+          <span className="text-gray-300">{'>'}</span>
+          <button
+            type="button"
+            onClick={() => onNavigateToView(activeView)}
+            className="text-gray-700 hover:text-[#ee4d2d]"
+          >
+            {activeView === 'my-income' ? '我的收入' : activeView === 'my-balance' ? '我的余额' : '银行账户'}
+          </button>
+        </div>
+      );
+    }
     return (
       <div className="flex items-center gap-2 text-[14px]">
         <span className="text-gray-300">{'>'}</span>
@@ -49,7 +73,7 @@ export default function Header({
         </button>
         <span className="text-gray-300">{'>'}</span>
         <button type="button" onClick={() => onNavigateToView('new-product')} className="text-gray-700 hover:text-[#ee4d2d]">
-          添加新商品
+          {isProductDetail ? '产品详情' : '添加新商品'}
         </button>
       </div>
     );

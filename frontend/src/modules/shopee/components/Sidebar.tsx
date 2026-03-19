@@ -4,7 +4,7 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 
-type ShopeeView = 'dashboard' | 'my-orders' | 'my-products' | 'new-product';
+type ShopeeView = 'dashboard' | 'my-orders' | 'my-products' | 'new-product' | 'my-income' | 'my-balance' | 'bank-accounts';
 
 const menuItems = [
   {
@@ -89,11 +89,23 @@ export default function Sidebar({ activeView, onSelectView }: SidebarProps) {
                       if (child === '添加新产品') {
                         onSelectView('new-product');
                       }
+                      if (child === '我的收入') {
+                        onSelectView('my-income');
+                      }
+                      if (child === '我的余额') {
+                        onSelectView('my-balance');
+                      }
+                      if (child === '银行账户') {
+                        onSelectView('bank-accounts');
+                      }
                     }}
                     className={`w-full text-left pl-10 pr-6 py-2 text-[14px] transition-colors font-normal ${
                       ((child === '我的订单' && activeView === 'my-orders') ||
                         (child === '我的产品' && activeView === 'my-products') ||
-                        (child === '添加新产品' && activeView === 'new-product'))
+                        (child === '添加新产品' && activeView === 'new-product') ||
+                        (child === '我的收入' && activeView === 'my-income') ||
+                        (child === '我的余额' && activeView === 'my-balance') ||
+                        (child === '银行账户' && activeView === 'bank-accounts'))
                         ? 'text-[#ee4d2d] border-l-2 border-[#ee4d2d] bg-[#fff7f5]'
                         : 'text-[#333333] hover:text-[#ee4d2d]'
                     }`}

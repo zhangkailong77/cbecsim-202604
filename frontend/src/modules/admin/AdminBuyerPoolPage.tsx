@@ -57,6 +57,9 @@ interface AdminRunOptionsResponse {
 }
 
 interface AdminSimulateOrdersResponse {
+  simulated_hours?: number;
+  tick_start_time?: string;
+  tick_end_time?: string;
   tick_time: string;
   active_buyer_count: number;
   candidate_product_count: number;
@@ -110,6 +113,16 @@ interface AdminSimulateOrdersResponse {
       buyer_payment: number;
     } | null;
   }>;
+  cancellation_logs: Array<{
+    order_id: number;
+    order_no: string;
+    buyer_name: string;
+    cancelled_at: string;
+    cancel_reason: string;
+    cancel_source: string;
+    overdue_hours: number;
+    cancel_prob: number;
+  }>;
 }
 
 interface AdminBuyerPoolPageProps {
@@ -161,6 +174,7 @@ export default function AdminBuyerPoolPage({
   const [simulateError, setSimulateError] = useState('');
   const [simulateResult, setSimulateResult] = useState<AdminSimulateOrdersResponse | null>(null);
   const [refreshTs, setRefreshTs] = useState<number>(Date.now());
+  const [fastForwardHours, setFastForwardHours] = useState<number>(1);
 
   const displayName = currentUser?.full_name?.trim() || currentUser?.username || 'yzcube';
 
@@ -224,16 +238,53 @@ export default function AdminBuyerPoolPage({
     setSimulateError('');
     setSimulateLoading(true);
     try {
-      const resp = await fetch(`${API_BASE_URL}/game/admin/runs/${runId}/orders/simulate`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!resp.ok) {
-        const payload = await resp.json().catch(() => ({}));
-        throw new Error(payload.detail || '模拟订单触发失败');
+      const hours = Math.max(1, Math.min(168, Number.isFinite(fastForwardHours) ? Math.floor(fastForwardHours) : 1));
+      let merged: AdminSimulateOrdersResponse | null = null;
+      let tickStartTime = '';
+      let tickEndTime = '';
+
+      for (let i = 0; i < hours; i += 1) {
+        const resp = await fetch(`${API_BASE_URL}/game/admin/runs/${runId}/orders/simulate`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!resp.ok) {
+          const payload = await resp.json().catch(() => ({}));
+          throw new Error(payload.detail || `第 ${i + 1} 小时模拟失败`);
+        }
+        const payload = (await resp.json()) as AdminSimulateOrdersResponse;
+        if (!tickStartTime) tickStartTime = payload.tick_time;
+        tickEndTime = payload.tick_time;
+
+        if (!merged) {
+          merged = {
+            ...payload,
+            simulated_hours: 1,
+            tick_start_time: payload.tick_time,
+            tick_end_time: payload.tick_time,
+          };
+        } else {
+          merged = {
+            ...payload,
+            simulated_hours: (merged.simulated_hours || 1) + 1,
+            tick_start_time: merged.tick_start_time || tickStartTime,
+            tick_end_time: payload.tick_time,
+            active_buyer_count: merged.active_buyer_count + payload.active_buyer_count,
+            candidate_product_count: merged.candidate_product_count + payload.candidate_product_count,
+            generated_order_count: merged.generated_order_count + payload.generated_order_count,
+            skip_reasons: Object.entries(payload.skip_reasons || {}).reduce((acc, [key, val]) => {
+              acc[key] = (acc[key] || 0) + val;
+              return acc;
+            }, { ...(merged.skip_reasons || {}) } as Record<string, number>),
+            cancellation_logs: [...(merged.cancellation_logs || []), ...(payload.cancellation_logs || [])],
+          };
+        }
       }
-      const payload = (await resp.json()) as AdminSimulateOrdersResponse;
-      setSimulateResult(payload);
+      if (merged) {
+        merged.tick_start_time = tickStartTime;
+        merged.tick_end_time = tickEndTime;
+        setSimulateResult(merged);
+      }
       await loadOverview(runId);
     } catch (err) {
       setSimulateError(err instanceof Error ? err.message : '模拟订单触发失败');
@@ -321,6 +372,26 @@ export default function AdminBuyerPoolPage({
                 <RefreshCw size={14} />
                 刷新
               </button>
+              <div className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 h-10">
+                <span className="text-[12px] text-slate-500">快进</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={168}
+                  step={1}
+                  value={fastForwardHours}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    if (!Number.isFinite(next)) {
+                      setFastForwardHours(1);
+                      return;
+                    }
+                    setFastForwardHours(Math.max(1, Math.min(168, Math.floor(next))));
+                  }}
+                  className="h-7 w-16 rounded border border-slate-200 px-2 text-[12px] font-semibold text-slate-700 outline-none"
+                />
+                <span className="text-[12px] text-slate-500">小时</span>
+              </div>
               <button
                 type="button"
                 onClick={() => void triggerSimulateOnce()}
@@ -328,7 +399,7 @@ export default function AdminBuyerPoolPage({
                 className="inline-flex h-10 items-center gap-2 rounded-xl bg-[#ea580c] px-4 text-[13px] font-semibold text-white hover:bg-[#c2410c] disabled:cursor-not-allowed disabled:bg-[#fdba74]"
               >
                 {simulateLoading ? <RefreshCw size={14} className="animate-spin" /> : <Users size={14} />}
-                模拟一小时订单
+                {simulateLoading ? '模拟中...' : `模拟 ${Math.max(1, fastForwardHours)} 小时订单`}
               </button>
             </div>
           </div>
@@ -382,7 +453,10 @@ export default function AdminBuyerPoolPage({
         {simulateResult && (
           <div className="mt-3 rounded-2xl border border-[#fed7aa] bg-[#fff7ed] px-4 py-3">
             <div className="text-[14px] font-bold text-[#9a3412]">本次模拟摘要</div>
-            <div className="mt-2 grid grid-cols-4 gap-3 text-[13px]">
+            <div className="mt-2 grid grid-cols-5 gap-3 text-[13px]">
+              <div className="rounded-lg border border-[#fdba74] bg-white px-3 py-2">
+                模拟时长：<span className="font-bold">{simulateResult.simulated_hours || 1}h</span>
+              </div>
               <div className="rounded-lg border border-[#fdba74] bg-white px-3 py-2">
                 激活买家：<span className="font-bold">{simulateResult.active_buyer_count}</span>
               </div>
@@ -393,7 +467,17 @@ export default function AdminBuyerPoolPage({
                 生成订单：<span className="font-bold">{simulateResult.generated_order_count}</span>
               </div>
               <div className="rounded-lg border border-[#fdba74] bg-white px-3 py-2">
-                模拟时刻：<span className="font-bold">{new Date(simulateResult.tick_time).toLocaleString()}</span>
+                模拟时段：
+                <span className="font-bold">
+                  {new Date(simulateResult.tick_start_time || simulateResult.tick_time).toLocaleString()}
+                  {' ~ '}
+                  {new Date(simulateResult.tick_end_time || simulateResult.tick_time).toLocaleString()}
+                </span>
+              </div>
+            </div>
+            <div className="mt-2 grid grid-cols-1 gap-3 text-[13px]">
+              <div className="rounded-lg border border-[#fdba74] bg-white px-3 py-2">
+                本次命中取消：<span className="font-bold text-rose-600">{(simulateResult.cancellation_logs ?? []).length}</span>
               </div>
             </div>
             {Object.keys(simulateResult.skip_reasons || {}).length > 0 && (
@@ -479,6 +563,41 @@ export default function AdminBuyerPoolPage({
                 ))}
                 {(simulateResult.buyer_journeys ?? []).length === 0 && (
                   <div className="px-3 py-6 text-[12px] text-slate-500">暂无买家决策明细</div>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-3 overflow-hidden rounded-xl border border-rose-200 bg-white">
+              <div className="flex items-center justify-between bg-rose-50 px-3 py-2 text-[12px] font-semibold text-rose-700">
+                <span>本次取消日志（时间加速后触发）</span>
+                <span>{(simulateResult.cancellation_logs ?? []).length} 条</span>
+              </div>
+              <div className="grid grid-cols-[1.2fr_1.3fr_1.2fr_1fr_1fr_1fr_1fr] bg-rose-50/60 px-3 py-2 text-[12px] font-semibold text-rose-700 border-t border-rose-100">
+                <div>订单号</div>
+                <div>买家</div>
+                <div>取消时间</div>
+                <div>超时小时</div>
+                <div>取消概率</div>
+                <div>取消来源</div>
+                <div>取消原因</div>
+              </div>
+              <div className="max-h-[220px] overflow-y-auto custom-scrollbar">
+                {(simulateResult.cancellation_logs ?? []).map((log, idx) => (
+                  <div
+                    key={`${log.order_id}-${idx}`}
+                    className="grid grid-cols-[1.2fr_1.3fr_1.2fr_1fr_1fr_1fr_1fr] border-t border-rose-100 px-3 py-2 text-[12px] text-slate-700"
+                  >
+                    <div className="font-semibold">{log.order_no}</div>
+                    <div>{log.buyer_name}</div>
+                    <div>{new Date(log.cancelled_at).toLocaleString()}</div>
+                    <div>{log.overdue_hours}h</div>
+                    <div>{(log.cancel_prob * 100).toFixed(1)}%</div>
+                    <div>{log.cancel_source}</div>
+                    <div>{log.cancel_reason}</div>
+                  </div>
+                ))}
+                {(simulateResult.cancellation_logs ?? []).length === 0 && (
+                  <div className="px-3 py-6 text-[12px] text-slate-500">本次模拟未触发取消</div>
                 )}
               </div>
             </div>

@@ -25,6 +25,7 @@ from app.models import (
     WarehouseStrategy,
 )
 from app.services.shopee_order_simulator import simulate_orders_for_run
+from app.services.shopee_order_cancellation import auto_cancel_overdue_orders_by_tick
 
 
 router = APIRouter(prefix="/game", tags=["game"])
@@ -270,6 +271,7 @@ class AdminSimulateOrdersResponse(BaseModel):
     skip_reasons: dict[str, int] = Field(default_factory=dict)
     shop_context: dict[str, Any] = Field(default_factory=dict)
     buyer_journeys: list[dict[str, Any]] = Field(default_factory=list)
+    cancellation_logs: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def _require_super_admin_or_403(current_user: dict):
@@ -320,6 +322,7 @@ def get_admin_buyer_pool_overview(
 
     selected_run: GameRun | None = None
     selected_run_username: str | None = None
+    selected_run_day_index: int | None = None
     if run_id is not None:
         selected_run = db.query(GameRun).filter(GameRun.id == run_id).first()
         if not selected_run:
@@ -331,20 +334,21 @@ def get_admin_buyer_pool_overview(
             db.query(User.username).filter(User.id == selected_run.user_id).scalar()
         )
 
-    now = datetime.now()
+    server_now = datetime.now()
     if selected_run:
         run_created = selected_run.created_at
-        elapsed_seconds = max(0, int((now - run_created).total_seconds()))
+        elapsed_seconds = max(0, int((server_now - run_created).total_seconds()))
         total_real_seconds = 7 * 24 * 60 * 60
         game_day_float = (elapsed_seconds / total_real_seconds) * 365 + 1
+        selected_run_day_index = min(365, max(1, int(game_day_float)))
         frac = game_day_float - int(game_day_float)
         seconds_of_day = max(0, int(frac * 24 * 60 * 60))
     else:
-        seconds_of_day = now.hour * 3600 + now.minute * 60 + now.second
+        seconds_of_day = server_now.hour * 3600 + server_now.minute * 60 + server_now.second
     game_minutes = seconds_of_day % (24 * 60)
     game_hour = game_minutes // 60
     game_minute = game_minutes % 60
-    game_clock = f"{game_hour:02d}:{game_minute:02d}:{now.second:02d}"
+    game_clock = f"{game_hour:02d}:{game_minute:02d}:{seconds_of_day % 60:02d}"
 
     rows = (
         db.query(SimBuyerProfile)
@@ -395,9 +399,9 @@ def get_admin_buyer_pool_overview(
         selected_run_status=selected_run.status if selected_run else None,
         selected_run_market=selected_run.market if selected_run else None,
         selected_run_username=selected_run_username,
-        selected_run_day_index=selected_run.day_index if selected_run else None,
+        selected_run_day_index=selected_run_day_index if selected_run else None,
         selected_run_created_at=selected_run.created_at if selected_run else None,
-        server_time=now,
+        server_time=server_now,
         game_clock=game_clock,
         game_hour=game_hour,
         game_minute=game_minute,
@@ -468,6 +472,13 @@ def admin_simulate_orders(
             effective_tick_time = datetime.utcnow()
 
     result = simulate_orders_for_run(db, run_id=run.id, user_id=run.user_id, tick_time=effective_tick_time)
+    cancellation_logs = auto_cancel_overdue_orders_by_tick(
+        db,
+        run_id=run.id,
+        user_id=run.user_id,
+        current_tick=result["tick_time"],
+        commit=True,
+    )
     owner_username = db.query(User.username).filter(User.id == run.user_id).scalar()
     return AdminSimulateOrdersResponse(
         tick_time=result["tick_time"],
@@ -483,6 +494,7 @@ def admin_simulate_orders(
             "status": run.status,
         },
         buyer_journeys=result.get("buyer_journeys") or [],
+        cancellation_logs=cancellation_logs,
     )
 
 

@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from dotenv import load_dotenv
 from pathlib import Path
@@ -11,10 +13,26 @@ from app.api.routes.health import router as health_router
 from app.api.routes.market import router as market_router
 from app.api.routes.shopee import router as shopee_router
 from app.db import init_database
+from app.services.auto_order_tick_worker import AUTO_ORDER_TICK_ENABLED, run_auto_order_tick_worker
 
 load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
-app = FastAPI(title="CBEC API Gateway", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    stop_event: asyncio.Event | None = None
+    worker_task: asyncio.Task | None = None
+    if AUTO_ORDER_TICK_ENABLED:
+        stop_event = asyncio.Event()
+        worker_task = asyncio.create_task(run_auto_order_tick_worker(stop_event))
+    try:
+        yield
+    finally:
+        if stop_event and worker_task:
+            stop_event.set()
+            await worker_task
+
+
+app = FastAPI(title="CBEC API Gateway", version="0.1.0", lifespan=lifespan)
 
 DEFAULT_CORS_ALLOW_ORIGINS = "http://127.0.0.1:3001,http://localhost:3001"
 DEFAULT_CORS_ALLOW_ORIGIN_REGEX = (

@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -87,6 +87,10 @@ class GameRun(Base):
     shopee_listings = relationship("ShopeeListing", back_populates="run")
     shopee_listing_drafts = relationship("ShopeeListingDraft", back_populates="run")
     shopee_orders = relationship("ShopeeOrder", back_populates="run")
+    shopee_order_logistics_events = relationship("ShopeeOrderLogisticsEvent", back_populates="run")
+    shopee_order_settlements = relationship("ShopeeOrderSettlement", back_populates="run")
+    shopee_finance_ledger_entries = relationship("ShopeeFinanceLedgerEntry", back_populates="run")
+    shopee_bank_accounts = relationship("ShopeeBankAccount", back_populates="run")
     shopee_order_generation_logs = relationship("ShopeeOrderGenerationLog", back_populates="run")
 
 
@@ -495,6 +499,7 @@ class ShopeeListingVariant(Base):
     option_note: Mapped[str | None] = mapped_column(String(255), nullable=True)
     price: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     stock: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sales_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     sku: Mapped[str | None] = mapped_column(String(64), nullable=True)
     gtin: Mapped[str | None] = mapped_column(String(64), nullable=True)
     item_without_gtin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -557,10 +562,23 @@ class ShopeeOrder(Base):
     process_status: Mapped[str] = mapped_column(String(24), nullable=False, default="processing", index=True)
     shipping_priority: Mapped[str] = mapped_column(String(24), nullable=False, default="today", index=True)
     shipping_channel: Mapped[str] = mapped_column(String(64), nullable=False, default="SPX快递")
+    delivery_line_key: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    delivery_line_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
     destination: Mapped[str] = mapped_column(String(128), nullable=False, default="吉隆坡")
     countdown_text: Mapped[str] = mapped_column(String(128), nullable=False, default="请在今日内处理")
     action_text: Mapped[str] = mapped_column(String(64), nullable=False, default="查看详情")
     ship_by_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    tracking_no: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    waybill_no: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    ship_by_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    shipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    eta_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    eta_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    distance_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    cancel_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    cancel_source: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -569,6 +587,9 @@ class ShopeeOrder(Base):
 
     run = relationship("GameRun", back_populates="shopee_orders")
     items = relationship("ShopeeOrderItem", back_populates="order")
+    logistics_events = relationship("ShopeeOrderLogisticsEvent", back_populates="order")
+    settlement = relationship("ShopeeOrderSettlement", back_populates="order", uselist=False)
+    finance_ledger_entries = relationship("ShopeeFinanceLedgerEntry", back_populates="order")
 
 
 class ShopeeOrderItem(Base):
@@ -583,6 +604,52 @@ class ShopeeOrderItem(Base):
     image_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     order = relationship("ShopeeOrder", back_populates="items")
+
+
+class ShopeeOrderLogisticsEvent(Base):
+    __tablename__ = "shopee_order_logistics_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("game_runs.id"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("shopee_orders.id"), nullable=False, index=True)
+    event_code: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    event_title: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_desc: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    run = relationship("GameRun", back_populates="shopee_order_logistics_events")
+    order = relationship("ShopeeOrder", back_populates="logistics_events")
+
+
+class ShopeeOrderSettlement(Base):
+    __tablename__ = "shopee_order_settlements"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("game_runs.id"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("shopee_orders.id"), nullable=False, unique=True, index=True)
+    buyer_payment: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    platform_commission_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    payment_fee_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    shipping_cost_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    shipping_subsidy_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    net_income_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    settlement_status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending", index=True)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    run = relationship("GameRun", back_populates="shopee_order_settlements")
+    order = relationship("ShopeeOrder", back_populates="settlement")
 
 
 class ShopeeOrderGenerationLog(Base):
@@ -606,6 +673,64 @@ class ShopeeOrderGenerationLog(Base):
     run = relationship("GameRun", back_populates="shopee_order_generation_logs")
 
 
+class ShopeeFinanceLedgerEntry(Base):
+    __tablename__ = "shopee_finance_ledger_entries"
+    __table_args__ = (
+        UniqueConstraint("order_id", "entry_type", name="uq_shopee_finance_ledger_order_entry_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("game_runs.id"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("shopee_orders.id"), nullable=True, index=True)
+    entry_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True, default="income_from_order")
+    direction: Mapped[str] = mapped_column(String(8), nullable=False, index=True, default="in")
+    amount: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    balance_after: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, index=True, default="completed")
+    remark: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    credited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    run = relationship("GameRun", back_populates="shopee_finance_ledger_entries")
+    order = relationship("ShopeeOrder", back_populates="finance_ledger_entries")
+
+
+class ShopeeBankAccount(Base):
+    __tablename__ = "shopee_bank_accounts"
+    __table_args__ = (
+        UniqueConstraint("run_id", "user_id", "account_no", name="uq_shopee_bank_accounts_run_user_account"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("game_runs.id"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    bank_name: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    account_holder: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    account_no: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    account_no_masked: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    currency: Mapped[str] = mapped_column(String(8), nullable=False, default="RM")
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    verify_status: Mapped[str] = mapped_column(String(16), nullable=False, default="verified", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    run = relationship("GameRun", back_populates="shopee_bank_accounts")
+
+
 class SimBuyerProfile(Base):
     __tablename__ = "sim_buyer_profiles"
 
@@ -615,6 +740,9 @@ class SimBuyerProfile(Base):
     gender: Mapped[str | None] = mapped_column(String(16), nullable=True)
     age: Mapped[int | None] = mapped_column(Integer, nullable=True)
     city: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    city_code: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lng: Mapped[float | None] = mapped_column(Float, nullable=True)
     occupation: Mapped[str | None] = mapped_column(String(64), nullable=True)
     background: Mapped[str | None] = mapped_column(Text, nullable=True)
     preferred_categories_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")

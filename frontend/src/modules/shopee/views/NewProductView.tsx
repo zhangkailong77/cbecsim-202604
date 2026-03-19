@@ -143,6 +143,7 @@ interface VariationCombinationRow {
 }
 
 interface VariationDetailRow {
+  sourceVariantId?: number | null;
   price: string;
   stock: string;
   sku: string;
@@ -194,6 +195,7 @@ function buildWholesaleTierId(): string {
 
 function buildDefaultVariationDetail(): VariationDetailRow {
   return {
+    sourceVariantId: null,
     price: '',
     stock: '0',
     sku: '',
@@ -837,6 +839,7 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
   const othersSectionRef = useRef<HTMLDivElement>(null);
   const detailScrollRef = useRef<HTMLDivElement>(null);
   const maxPurchaseDropdownRef = useRef<HTMLDivElement>(null);
+  const isEditingMode = Boolean(editingListingId);
 
   const hydrateEditListing = (listing: ListingEditDetail) => {
     setSourceListingId(listing.id);
@@ -961,6 +964,7 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
 
       details[rowId] = {
         ...buildDefaultVariationDetail(),
+        sourceVariantId: row.id,
         price: String(Math.max(Number(row.price || 0), 0)),
         stock: String(Math.max(Number(row.stock || 0), 0)),
         sku: row.sku || '',
@@ -1270,7 +1274,7 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
     setDraft(data);
   };
 
-  const publishDraft = async (statusValue: 'live' | 'unpublished') => {
+  const publishDraft = async (statusValue: 'live' | 'unpublished' | 'keep') => {
     if (!runId || !draft) {
       setError('草稿不存在，请重新创建');
       return;
@@ -1382,10 +1386,12 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
             variant_name: row.variantName,
             option_value: row.optionValue,
             option_note: row.optionNote || null,
+            source_variant_id: detail?.sourceVariantId ?? null,
             price: Math.max(Number(detail?.price || '0') || 0, 0),
             stock: Math.max(Number(detail?.stock || '0') || 0, 0),
             sku: (detail?.sku || '').trim() || null,
             gtin: (detail?.gtin || '').trim() || null,
+            image_url: detail?.imageFile ? null : ((detail?.imagePreview || '').trim() || null),
             item_without_gtin: Boolean(detail?.itemWithoutGtin),
             weight_kg: Number.isFinite(Number(detail?.weightKg || '')) && Number(detail?.weightKg || '') > 0
               ? Number(detail?.weightKg || '')
@@ -1416,7 +1422,13 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
         throw new Error(data?.detail || '发布商品失败');
       }
 
-      setSuccess(statusValue === 'live' ? '商品已保存并发布，正在返回我的产品...' : '商品已保存为未发布，正在返回我的产品...');
+      if (statusValue === 'keep') {
+        setSuccess('商品信息已更新，正在返回我的产品...');
+      } else if (statusValue === 'live') {
+        setSuccess('商品已保存并发布，正在返回我的产品...');
+      } else {
+        setSuccess('商品已保存为未发布，正在返回我的产品...');
+      }
       setTimeout(() => onBackToProducts(), 500);
     } catch (e) {
       setError(e instanceof Error ? e.message : '发布商品失败');
@@ -3111,15 +3123,15 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
                   onClick={() => publishDraft('unpublished')}
                   className={`h-9 rounded border px-8 text-[14px] ${publishing || uploadingAssets ? 'cursor-not-allowed border-[#ebebeb] bg-[#f5f5f5] text-[#bcbcbc]' : 'border-[#d5d5d5] text-[#666] hover:bg-[#f7f7f7]'}`}
                 >
-                  保存并下架
+                  {isEditingMode ? '下架' : '保存并下架'}
                 </button>
                 <button
                   type="button"
                   disabled={publishing || uploadingAssets}
-                  onClick={() => publishDraft('live')}
+                  onClick={() => publishDraft(isEditingMode ? 'keep' : 'live')}
                   className={`h-9 rounded px-8 text-[14px] text-white ${publishing || uploadingAssets ? 'cursor-not-allowed bg-[#f9b4a8]' : 'bg-[#ee4d2d] hover:bg-[#d73211]'}`}
                 >
-                  {publishing ? '保存中...' : '保存并发布'}
+                  {publishing ? (isEditingMode ? '更新中...' : '保存中...') : (isEditingMode ? '更新' : '保存并发布')}
                 </button>
               </div>
             </div>
@@ -3260,7 +3272,7 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
       <div className="mx-auto grid max-w-[1720px] grid-cols-[1fr_380px] gap-5">
         <div className="space-y-4">
           <div className="rounded-sm border border-gray-200 bg-white p-6">
-            <h2 className="text-[20px] font-semibold leading-none text-[#222]">添加新商品</h2>
+            <h2 className="text-[20px] font-semibold leading-none text-[#222]">{isEditingMode ? '产品详情' : '添加新商品'}</h2>
             <p className="mt-3 text-[16px] text-[#777]">
               输入商品名称或图片后，Shopee 将智能匹配最合适的 Shopee 标准商品，并自动为你填充上架信息
             </p>

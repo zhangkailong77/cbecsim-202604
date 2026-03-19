@@ -88,6 +88,8 @@ def init_database():
     _ensure_shopee_listings_columns()
     _ensure_shopee_listing_drafts_columns()
     _ensure_shopee_spec_templates_columns()
+    _ensure_sim_buyer_profiles_columns()
+    _ensure_shopee_orders_fulfillment_columns()
     _cleanup_game_runs_legacy_columns()
     _ensure_table_comments()
     _ensure_column_comments()
@@ -489,6 +491,18 @@ def init_database():
             "Kuala Lumpur", "Selangor", "Penang", "Johor Bahru", "Ipoh",
             "Malacca", "Kedah", "Sabah", "Sarawak", "Shah Alam",
         ]
+        city_geo_map = {
+            "Kuala Lumpur": {"city_code": "MY-KUL", "lat": 3.1390, "lng": 101.6869},
+            "Selangor": {"city_code": "MY-SGR", "lat": 3.0738, "lng": 101.5183},
+            "Penang": {"city_code": "MY-PNG", "lat": 5.4141, "lng": 100.3288},
+            "Johor Bahru": {"city_code": "MY-JHB", "lat": 1.4927, "lng": 103.7414},
+            "Ipoh": {"city_code": "MY-IPH", "lat": 4.5975, "lng": 101.0901},
+            "Malacca": {"city_code": "MY-MLK", "lat": 2.1896, "lng": 102.2501},
+            "Kedah": {"city_code": "MY-KDH", "lat": 6.1184, "lng": 100.3685},
+            "Sabah": {"city_code": "MY-SBH", "lat": 5.9804, "lng": 116.0735},
+            "Sarawak": {"city_code": "MY-SWK", "lat": 1.5533, "lng": 110.3592},
+            "Shah Alam": {"city_code": "MY-SAM", "lat": 3.0733, "lng": 101.5185},
+        }
         occupations = [
             "University Student", "Software Engineer", "E-commerce Agent", "Retail Owner", "Designer",
             "Logistics Planner", "Teacher", "Content Creator", "Sales Executive", "Purchasing Manager",
@@ -508,24 +522,77 @@ def init_database():
             ["手机与数码"],
         ]
 
-        def _build_multi_peak_hours(seed_idx: int) -> list[float]:
+        def _in_sleep_window(hour_idx: int, sleep_start: int, sleep_len: int) -> bool:
+            sleep_end = (sleep_start + sleep_len) % 24
+            if sleep_start < sleep_end:
+                return sleep_start <= hour_idx < sleep_end
+            return hour_idx >= sleep_start or hour_idx < sleep_end
+
+        def _hour_distance_circular(a: int, b: int) -> int:
+            diff = abs(a - b)
+            return min(diff, 24 - diff)
+
+        def _build_sleep_aware_hours(seed_idx: int) -> list[float]:
             local_rng = Random(7000 + seed_idx)
-            morning_peak = 8 + local_rng.randint(-1, 1)
-            noon_peak = 13 + local_rng.randint(-1, 1)
-            evening_peak = 21 + local_rng.randint(-1, 1)
-            peaks = [
-                (morning_peak, 0.10 + local_rng.random() * 0.04, 2),
-                (noon_peak, 0.08 + local_rng.random() * 0.04, 2),
-                (evening_peak, 0.13 + local_rng.random() * 0.05, 3),
-            ]
+            chrono_roll = local_rng.random()
+            # 连续作息窗口（非离散随机置零）：更接近真实用户行为
+            if chrono_roll < 0.20:
+                # 早睡早起
+                sleep_start = 22 + local_rng.randint(-1, 0)
+                sleep_len = 7 + local_rng.randint(0, 1)
+                peaks = [
+                    (7 + local_rng.randint(-1, 1), 0.11 + local_rng.random() * 0.05, 2),
+                    (12 + local_rng.randint(-1, 1), 0.09 + local_rng.random() * 0.04, 2),
+                    (19 + local_rng.randint(-1, 1), 0.10 + local_rng.random() * 0.04, 3),
+                ]
+            elif chrono_roll < 0.75:
+                # 常规作息
+                sleep_start = 23 + local_rng.randint(0, 1)
+                sleep_len = 6 + local_rng.randint(0, 2)
+                peaks = [
+                    (8 + local_rng.randint(-1, 1), 0.10 + local_rng.random() * 0.04, 2),
+                    (13 + local_rng.randint(-1, 1), 0.08 + local_rng.random() * 0.04, 2),
+                    (21 + local_rng.randint(-1, 1), 0.13 + local_rng.random() * 0.05, 3),
+                ]
+            elif chrono_roll < 0.93:
+                # 夜猫
+                sleep_start = 1 + local_rng.randint(0, 1)
+                sleep_len = 6 + local_rng.randint(0, 1)
+                peaks = [
+                    (10 + local_rng.randint(-1, 1), 0.07 + local_rng.random() * 0.03, 2),
+                    (15 + local_rng.randint(-1, 1), 0.09 + local_rng.random() * 0.04, 2),
+                    (23 + local_rng.randint(-1, 1), 0.14 + local_rng.random() * 0.05, 3),
+                ]
+            else:
+                # 轮班（深夜活跃但仍有连续低谷）
+                sleep_start = 4 + local_rng.randint(0, 1)
+                sleep_len = 5 + local_rng.randint(0, 1)
+                peaks = [
+                    (1 + local_rng.randint(-1, 1), 0.12 + local_rng.random() * 0.04, 2),
+                    (10 + local_rng.randint(-1, 1), 0.08 + local_rng.random() * 0.03, 2),
+                    (20 + local_rng.randint(-1, 1), 0.10 + local_rng.random() * 0.04, 2),
+                ]
+
             values: list[float] = []
             for hour_idx in range(24):
-                val = 0.012 + local_rng.random() * 0.01
+                if _in_sleep_window(hour_idx, sleep_start, sleep_len):
+                    values.append(0.0)
+                    continue
+
+                val = 0.010 + local_rng.random() * 0.010
+
+                # 睡眠窗口前后1小时设为“软低活跃”
+                if _hour_distance_circular(hour_idx, sleep_start) == 1 or _hour_distance_circular(
+                    hour_idx, (sleep_start + sleep_len) % 24
+                ) == 1:
+                    val = min(val, 0.015 + local_rng.random() * 0.010)
+
                 for peak_center, peak_amp, width in peaks:
-                    distance = abs(hour_idx - peak_center)
+                    distance = _hour_distance_circular(hour_idx, peak_center)
                     if distance <= width:
                         val += peak_amp * (1 - distance / (width + 1))
-                values.append(round(max(0.01, min(0.35, val)), 3))
+
+                values.append(round(max(0.0, min(0.35, val)), 3))
             return values
 
         buyer_seed = []
@@ -540,7 +607,7 @@ def init_database():
                     "occupation": occupations[idx % len(occupations)],
                     "background": backgrounds[idx % len(backgrounds)],
                     "preferred_categories": category_groups[idx % len(category_groups)],
-                    "active_hours": _build_multi_peak_hours(idx),
+                    "active_hours": _build_sleep_aware_hours(idx),
                     "weekday_factors": [
                         round(0.95 + rng.random() * 0.12, 2),
                         round(0.95 + rng.random() * 0.12, 2),
@@ -570,6 +637,9 @@ def init_database():
                 "gender": item["gender"],
                 "age": item["age"],
                 "city": item["city"],
+                "city_code": city_geo_map.get(item["city"], {}).get("city_code"),
+                "lat": city_geo_map.get(item["city"], {}).get("lat"),
+                "lng": city_geo_map.get(item["city"], {}).get("lng"),
                 "occupation": item["occupation"],
                 "background": item["background"],
                 "preferred_categories_json": json.dumps(item["preferred_categories"], ensure_ascii=False),
@@ -727,6 +797,8 @@ def _ensure_shopee_listing_variants_columns():
         missing_sql.append("ALTER TABLE shopee_listing_variants ADD COLUMN parcel_width_cm INTEGER NULL")
     if "parcel_height_cm" not in existing_columns:
         missing_sql.append("ALTER TABLE shopee_listing_variants ADD COLUMN parcel_height_cm INTEGER NULL")
+    if "sales_count" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_listing_variants ADD COLUMN sales_count INTEGER NOT NULL DEFAULT 0")
 
     if not missing_sql:
         return
@@ -857,6 +929,70 @@ def _ensure_shopee_spec_templates_columns():
                     conn.execute(text(sql))
 
 
+def _ensure_sim_buyer_profiles_columns():
+    inspector = inspect(engine)
+    if "sim_buyer_profiles" not in inspector.get_table_names():
+        return
+
+    existing_columns = {col["name"] for col in inspector.get_columns("sim_buyer_profiles")}
+    missing_sql = []
+    if "city_code" not in existing_columns:
+        missing_sql.append("ALTER TABLE sim_buyer_profiles ADD COLUMN city_code VARCHAR(32) NULL")
+    if "lat" not in existing_columns:
+        missing_sql.append("ALTER TABLE sim_buyer_profiles ADD COLUMN lat FLOAT NULL")
+    if "lng" not in existing_columns:
+        missing_sql.append("ALTER TABLE sim_buyer_profiles ADD COLUMN lng FLOAT NULL")
+
+    if not missing_sql:
+        return
+
+    with engine.begin() as conn:
+        for sql in missing_sql:
+            conn.execute(text(sql))
+
+
+def _ensure_shopee_orders_fulfillment_columns():
+    inspector = inspect(engine)
+    if "shopee_orders" not in inspector.get_table_names():
+        return
+
+    existing_columns = {col["name"] for col in inspector.get_columns("shopee_orders")}
+    missing_sql = []
+    if "tracking_no" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN tracking_no VARCHAR(64) NULL")
+    if "waybill_no" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN waybill_no VARCHAR(64) NULL")
+    if "ship_by_at" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN ship_by_at DATETIME NULL")
+    if "shipped_at" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN shipped_at DATETIME NULL")
+    if "delivered_at" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN delivered_at DATETIME NULL")
+    if "eta_start_at" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN eta_start_at DATETIME NULL")
+    if "eta_end_at" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN eta_end_at DATETIME NULL")
+    if "distance_km" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN distance_km FLOAT NULL")
+    if "cancelled_at" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN cancelled_at DATETIME NULL")
+    if "cancel_reason" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN cancel_reason VARCHAR(64) NULL")
+    if "cancel_source" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN cancel_source VARCHAR(32) NULL")
+    if "delivery_line_key" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN delivery_line_key VARCHAR(32) NULL")
+    if "delivery_line_label" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN delivery_line_label VARCHAR(64) NULL")
+
+    if not missing_sql:
+        return
+
+    with engine.begin() as conn:
+        for sql in missing_sql:
+            conn.execute(text(sql))
+
+
 def _ensure_table_comments():
     if DATABASE_URL.startswith("sqlite"):
         return
@@ -887,6 +1023,10 @@ def _ensure_table_comments():
         "shopee_listing_wholesale_tiers": "Shopee 正式商品批发价阶梯表",
         "shopee_orders": "Shopee 店铺订单主表",
         "shopee_order_items": "Shopee 订单明细表",
+        "shopee_order_logistics_events": "Shopee 订单物流轨迹事件表",
+        "shopee_order_settlements": "Shopee 订单结算明细表",
+        "shopee_finance_ledger_entries": "Shopee 财务流水明细表（回款/支出）",
+        "shopee_bank_accounts": "Shopee 银行账户表（收款账户管理）",
         "shopee_order_generation_logs": "Shopee 订单模拟生成日志表",
         "warehouse_landmarks": "海外仓地标点位表",
         "sim_buyer_profiles": "买家画像池表（模拟订单买家）",
@@ -1171,6 +1311,7 @@ def _ensure_column_comments():
             "option_note": "变体选项说明",
             "price": "变体价格",
             "stock": "变体库存",
+            "sales_count": "变体销量",
             "sku": "变体SKU",
             "gtin": "变体GTIN",
             "item_without_gtin": "是否无GTIN",
@@ -1205,10 +1346,23 @@ def _ensure_column_comments():
             "process_status": "处理状态",
             "shipping_priority": "发货优先级",
             "shipping_channel": "物流渠道",
+            "delivery_line_key": "履约线路键(economy/standard/express)",
+            "delivery_line_label": "履约线路展示名(如快速线/标准线/经济线)",
             "destination": "收货地区",
             "countdown_text": "倒计时文案",
             "action_text": "操作文案",
             "ship_by_date": "最晚发货时间",
+            "tracking_no": "快递追踪号",
+            "waybill_no": "面单号",
+            "ship_by_at": "最晚发货时间",
+            "shipped_at": "实际发货时间",
+            "delivered_at": "签收时间",
+            "eta_start_at": "预计送达开始时间",
+            "eta_end_at": "预计送达结束时间",
+            "distance_km": "仓点至买家距离(公里)",
+            "cancelled_at": "取消时间",
+            "cancel_reason": "取消原因",
+            "cancel_source": "取消来源",
             "created_at": "创建时间",
         },
         "shopee_order_items": {
@@ -1219,6 +1373,60 @@ def _ensure_column_comments():
             "quantity": "购买数量",
             "unit_price": "成交单价",
             "image_url": "商品图地址",
+        },
+        "shopee_order_logistics_events": {
+            "id": "主键ID",
+            "run_id": "对局ID",
+            "user_id": "用户ID",
+            "order_id": "订单ID",
+            "event_code": "事件编码",
+            "event_title": "事件标题",
+            "event_desc": "事件描述",
+            "event_time": "事件时间",
+            "created_at": "创建时间",
+        },
+        "shopee_order_settlements": {
+            "id": "主键ID",
+            "run_id": "对局ID",
+            "user_id": "用户ID",
+            "order_id": "订单ID",
+            "buyer_payment": "买家实付金额",
+            "platform_commission_amount": "平台佣金金额",
+            "payment_fee_amount": "支付手续费金额",
+            "shipping_cost_amount": "运费成本金额",
+            "shipping_subsidy_amount": "运费补贴金额",
+            "net_income_amount": "净收入金额",
+            "settlement_status": "结算状态",
+            "settled_at": "结算时间",
+            "created_at": "创建时间",
+        },
+        "shopee_finance_ledger_entries": {
+            "id": "主键ID",
+            "run_id": "对局ID",
+            "user_id": "用户ID",
+            "order_id": "关联订单ID（非订单流水可为空）",
+            "entry_type": "流水类型（income_from_order/adjustment/withdrawal）",
+            "direction": "资金方向（in/out）",
+            "amount": "流水金额",
+            "balance_after": "该笔流水后余额快照",
+            "status": "流水状态（completed/pending/voided）",
+            "remark": "备注",
+            "credited_at": "入账时间（游戏时间）",
+            "created_at": "创建时间",
+        },
+        "shopee_bank_accounts": {
+            "id": "主键ID",
+            "run_id": "对局ID",
+            "user_id": "用户ID",
+            "bank_name": "银行名称",
+            "account_holder": "持卡人姓名",
+            "account_no": "银行卡号（完整值）",
+            "account_no_masked": "银行卡号脱敏值",
+            "currency": "币种（RM）",
+            "is_default": "是否默认收款账户",
+            "verify_status": "校验状态（verified/pending）",
+            "created_at": "创建时间",
+            "updated_at": "更新时间",
         },
         "shopee_order_generation_logs": {
             "id": "主键ID",
@@ -1252,6 +1460,9 @@ def _ensure_column_comments():
             "gender": "性别",
             "age": "年龄",
             "city": "城市",
+            "city_code": "城市编码",
+            "lat": "纬度",
+            "lng": "经度",
             "occupation": "职业",
             "background": "人物背景",
             "preferred_categories_json": "偏好类目JSON",

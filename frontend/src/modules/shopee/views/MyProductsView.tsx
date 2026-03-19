@@ -29,6 +29,7 @@ interface ProductVariantRow {
   option_note: string | null;
   price: number;
   stock: number;
+  sales_count: number;
   sku: string | null;
   image_url: string | null;
 }
@@ -400,7 +401,7 @@ export default function MyProductsView({ runId, onGotoNewProduct }: MyProductsVi
                               <div className="text-[12px] text-gray-500">Model ID: {variant.id}</div>
                             </div>
                           </div>
-                          <div className="text-gray-700">0</div>
+                          <div className="text-gray-700">{variant.sales_count ?? 0}</div>
                           <div>
                             <div className="text-gray-700">{formatPrice(variant.price)}</div>
                           </div>

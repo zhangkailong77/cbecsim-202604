@@ -383,6 +383,7 @@ def simulate_orders_for_run(
         best_listing.sales_count = int(best_listing.sales_count or 0) + quantity
         if variant:
             variant.stock = max(0, int(variant.stock or 0) - quantity)
+            variant.sales_count = int(variant.sales_count or 0) + quantity
             # Keep parent stock synchronized with variant total for variant listings.
             best_listing.stock_available = _listing_available_stock(best_listing)
 
@@ -401,6 +402,7 @@ def simulate_orders_for_run(
             countdown_text="请在24小时内处理",
             action_text="查看详情",
             ship_by_date=now + timedelta(days=1),
+            ship_by_at=now + timedelta(days=1),
         )
         db.add(order)
         db.flush()
