@@ -15,7 +15,11 @@ from app.api.routes.shopee import router as shopee_router
 from app.db import init_database
 from app.services.auto_order_tick_worker import AUTO_ORDER_TICK_ENABLED, run_auto_order_tick_worker
 
-load_dotenv(Path(__file__).resolve().parents[3] / ".env")
+_main_file = Path(__file__).resolve()
+if len(_main_file.parents) > 3:
+    dotenv_path = _main_file.parents[3] / ".env"
+    if dotenv_path.exists():
+        load_dotenv(dotenv_path)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
