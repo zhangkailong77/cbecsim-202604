@@ -4,6 +4,8 @@ services:
       context: ./backend/apps/api-gateway
       dockerfile: Dockerfile
     container_name: cbec_api_2027
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       DATABASE_URL: ${CBEC_DATABASE_URL}
       DB_NAME: ${CBEC_DB_NAME:-cbec_sim}
