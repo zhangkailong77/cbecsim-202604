@@ -183,6 +183,61 @@ interface WarehouseSummaryResp {
   inventory_total_sku: number;
 }
 
+interface StockMovementRow {
+  id: number;
+  movement_type: string;
+  movement_type_label: string;
+  qty_delta_on_hand: number;
+  qty_delta_reserved: number;
+  qty_delta_backorder: number;
+  product_id: number | null;
+  listing_id: number | null;
+  variant_id: number | null;
+  biz_order_id: number | null;
+  biz_ref: string | null;
+  remark: string | null;
+  created_at: string;
+}
+
+interface StockMovementsResp {
+  page: number;
+  page_size: number;
+  total: number;
+  rows: StockMovementRow[];
+}
+
+interface BackorderRiskItem {
+  listing_id: number | null;
+  variant_id: number | null;
+  title: string;
+  sku: string | null;
+  pending_order_count: number;
+  backorder_qty_total: number;
+  overdue_order_count: number;
+  urgent_24h_order_count: number;
+  nearest_deadline_at: string | null;
+  estimated_cancel_amount: number;
+}
+
+interface BackorderRiskResp {
+  current_tick: string;
+  affected_order_count: number;
+  backorder_qty_total: number;
+  overdue_order_count: number;
+  urgent_24h_order_count: number;
+  estimated_cancel_amount_total: number;
+  top_items: BackorderRiskItem[];
+}
+
+interface WarehouseStockOverviewResp {
+  inventory_sku_count: number;
+  total_stock_qty: number;
+  available_stock_qty: number;
+  reserved_stock_qty: number;
+  backorder_qty: number;
+  locked_stock_qty: number;
+}
+
 const fmtMoney = (n: number) => `${Math.max(0, Math.round(n)).toLocaleString()} RMB`;
 
 export default function WarehouseInboundPage({ run, currentUser, onBackToSetup, onEnterShopee }: WarehouseInboundPageProps) {
@@ -198,6 +253,17 @@ export default function WarehouseInboundPage({ run, currentUser, onBackToSetup, 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [activeTab, setActiveTab] = useState<'decision' | 'movements'>('decision');
+  const [recentMovements, setRecentMovements] = useState<StockMovementRow[]>([]);
+  const [movements, setMovements] = useState<StockMovementRow[]>([]);
+  const [movementPage, setMovementPage] = useState(1);
+  const [movementPageSize] = useState(12);
+  const [movementTotal, setMovementTotal] = useState(0);
+  const [movementTypeFilter, setMovementTypeFilter] = useState('all');
+  const [movementKeyword, setMovementKeyword] = useState('');
+  const [movementKeywordInput, setMovementKeywordInput] = useState('');
+  const [backorderRisk, setBackorderRisk] = useState<BackorderRiskResp | null>(null);
+  const [stockOverview, setStockOverview] = useState<WarehouseStockOverviewResp | null>(null);
 
   const playerDisplayName = currentUser?.full_name?.trim() || currentUser?.username || '玩家';
 
@@ -214,12 +280,41 @@ export default function WarehouseInboundPage({ run, currentUser, onBackToSetup, 
     return () => window.removeEventListener('resize', resize);
   }, []);
 
+  const fetchStockMovements = useCallback(
+    async (params: { page: number; page_size: number; movement_type?: string; keyword?: string }, onlyRecent = false) => {
+      if (!run?.id) return;
+      const token = localStorage.getItem(ACCESS_TOKEN_KEY);
+      if (!token) return;
+      const search = new URLSearchParams();
+      search.set('page', String(params.page));
+      search.set('page_size', String(params.page_size));
+      if (params.movement_type && params.movement_type !== 'all') {
+        search.set('movement_type', params.movement_type);
+      }
+      if (params.keyword && params.keyword.trim()) {
+        search.set('keyword', params.keyword.trim());
+      }
+      const resp = await fetch(`${API_BASE_URL}/game/runs/${run.id}/warehouse/stock-movements?${search.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) return;
+      const data = (await resp.json()) as StockMovementsResp;
+      if (onlyRecent) {
+        setRecentMovements(data.rows);
+      } else {
+        setMovements(data.rows);
+        setMovementTotal(data.total);
+      }
+    },
+    [run?.id],
+  );
+
   const loadData = async () => {
     if (!run?.id) return;
     const token = localStorage.getItem(ACCESS_TOKEN_KEY);
     if (!token) return;
 
-    const [optResp, candResp, summaryResp, cashResp, landmarksResp] = await Promise.all([
+    const [optResp, candResp, summaryResp, cashResp, landmarksResp, stockOverviewResp, riskResp] = await Promise.all([
       fetch(`${API_BASE_URL}/game/runs/${run.id}/warehouse/options`, {
         headers: { Authorization: `Bearer ${token}` },
       }),
@@ -235,6 +330,13 @@ export default function WarehouseInboundPage({ run, currentUser, onBackToSetup, 
       fetch(`${API_BASE_URL}/game/runs/${run.id}/warehouse/landmarks`, {
         headers: { Authorization: `Bearer ${token}` },
       }),
+      fetch(`${API_BASE_URL}/game/runs/${run.id}/warehouse/stock-overview`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+      fetch(`${API_BASE_URL}/game/runs/${run.id}/warehouse/backorder-risk?top_n=5`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+      fetchStockMovements({ page: 1, page_size: 5 }, true),
     ]);
 
     if (optResp.ok) {
@@ -263,11 +365,36 @@ export default function WarehouseInboundPage({ run, currentUser, onBackToSetup, 
     } else {
       setWarehouseModePoints(EMPTY_WAREHOUSE_MODE_POINTS);
     }
+    if (stockOverviewResp.ok) {
+      const data = (await stockOverviewResp.json()) as WarehouseStockOverviewResp;
+      setStockOverview(data);
+    } else {
+      setStockOverview(null);
+    }
+    if (riskResp.ok) {
+      const data = (await riskResp.json()) as BackorderRiskResp;
+      setBackorderRisk(data);
+    } else {
+      setBackorderRisk(null);
+    }
   };
 
   useEffect(() => {
     void loadData();
   }, [run?.id]);
+
+  useEffect(() => {
+    if (activeTab !== 'movements') return;
+    void fetchStockMovements(
+      {
+        page: movementPage,
+        page_size: movementPageSize,
+        movement_type: movementTypeFilter,
+        keyword: movementKeyword,
+      },
+      false,
+    );
+  }, [activeTab, movementKeyword, movementPage, movementPageSize, movementTypeFilter, fetchStockMovements]);
 
   const modeOption = useMemo(
     () => options?.warehouse_modes.find((item) => item.key === selectedMode) ?? options?.warehouse_modes[0] ?? null,
@@ -315,6 +442,36 @@ export default function WarehouseInboundPage({ run, currentUser, onBackToSetup, 
     };
   }, [summary?.strategy, modeOption, locationOption, totalCost]);
   const zoneForecast = useMemo(() => calcZoneForecast(selectedMode, selectedLocation), [selectedMode, selectedLocation]);
+  const movementTotalPage = Math.max(1, Math.ceil(movementTotal / movementPageSize));
+
+  const formatMovementTime = (value: string) => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '--';
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    const hh = String(date.getHours()).padStart(2, '0');
+    const mm = String(date.getMinutes()).padStart(2, '0');
+    const ss = String(date.getSeconds()).padStart(2, '0');
+    return `${y}/${m}/${d} ${hh}:${mm}:${ss}`;
+  };
+
+  const formatYmdHm = (value: string | null) => {
+    if (!value) return '--';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '--';
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    const hh = String(date.getHours()).padStart(2, '0');
+    const mm = String(date.getMinutes()).padStart(2, '0');
+    return `${y}/${m}/${d} ${hh}:${mm}`;
+  };
+
+  const applyMovementFilter = () => {
+    setMovementPage(1);
+    setMovementKeyword(movementKeywordInput.trim());
+  };
 
   const handleConfirmInbound = async () => {
     if (!run?.id || !modeOption || !locationOption) return;
@@ -426,8 +583,28 @@ export default function WarehouseInboundPage({ run, currentUser, onBackToSetup, 
           <div className="mb-4 rounded-2xl border border-[#dbeafe] bg-gradient-to-r from-[#eff6ff] to-[#f8fbff] px-5 py-4 text-[14px] text-[#1e3a8a]">
             Step 04 需要先选择仓型与仓位，再一次性将“已清关完成”的物流单全部入仓，生成后续运营库存能力参数。
           </div>
+          <div className="mb-3 inline-flex rounded-xl border border-slate-200 bg-white p-1">
+            <button
+              type="button"
+              onClick={() => setActiveTab('decision')}
+              className={`rounded-lg px-4 py-1.5 text-[13px] font-semibold ${
+                activeTab === 'decision' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              入仓决策
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('movements')}
+              className={`rounded-lg px-4 py-1.5 text-[13px] font-semibold ${
+                activeTab === 'movements' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              库存变动明细
+            </button>
+          </div>
 
-          <div className="grid grid-cols-[360px_1fr_430px] gap-4">
+          {activeTab === 'decision' ? <div className="grid grid-cols-[360px_1fr_430px] gap-4">
             <section className="rounded-2xl border border-[#e5ecfb] bg-white p-4">
               <div className="mb-3 text-[17px] font-black text-slate-800">A. 仓型方案（3选1）</div>
               <div className="space-y-3">
@@ -633,8 +810,208 @@ export default function WarehouseInboundPage({ run, currentUser, onBackToSetup, 
                   </table>
                 </div>
               </section>
+
+              <section className="rounded-2xl border border-[#e5ecfb] bg-white p-4">
+                <div className="mb-2 text-[15px] font-black text-slate-800">F. 缺货风险看板</div>
+                <div className="space-y-2 text-[13px]">
+                  <KV label="受影响订单" value={`${backorderRisk?.affected_order_count ?? 0} 单`} />
+                  <KV label="缺货总量" value={`${(backorderRisk?.backorder_qty_total ?? 0).toLocaleString()} 件`} />
+                  <KV label="24小时内风险单" value={`${backorderRisk?.urgent_24h_order_count ?? 0} 单`} danger={(backorderRisk?.urgent_24h_order_count ?? 0) > 0} />
+                  <KV label="已超时风险单" value={`${backorderRisk?.overdue_order_count ?? 0} 单`} danger={(backorderRisk?.overdue_order_count ?? 0) > 0} />
+                  <KV
+                    label="预估取消损失"
+                    value={fmtMoney(Math.round(backorderRisk?.estimated_cancel_amount_total ?? 0))}
+                    danger={(backorderRisk?.estimated_cancel_amount_total ?? 0) > 0}
+                  />
+                </div>
+                <div className="mt-3 max-h-[180px] overflow-auto rounded-xl border border-slate-100">
+                  <table className="w-full text-left text-[12px]">
+                    <thead className="bg-slate-50 text-slate-500">
+                      <tr>
+                        <th className="px-2 py-1.5">SKU/商品</th>
+                        <th className="px-2 py-1.5">缺口</th>
+                        <th className="px-2 py-1.5">最早截止</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(backorderRisk?.top_items?.length ?? 0) <= 0 && (
+                        <tr>
+                          <td colSpan={3} className="px-2 py-5 text-center text-slate-400">暂无缺货风险</td>
+                        </tr>
+                      )}
+                      {(backorderRisk?.top_items ?? []).map((item, idx) => (
+                        <tr key={`${item.listing_id ?? 'l'}-${item.variant_id ?? 'v'}-${idx}`} className="border-t border-slate-100 text-slate-700">
+                          <td className="px-2 py-1.5">
+                            <div className="truncate">{item.sku || item.title}</div>
+                            {item.sku && <div className="truncate text-[11px] text-slate-400">{item.title}</div>}
+                          </td>
+                          <td className="px-2 py-1.5 text-rose-600">{item.backorder_qty_total}</td>
+                          <td className="px-2 py-1.5 text-slate-500">{formatYmdHm(item.nearest_deadline_at)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section className="rounded-2xl border border-[#e5ecfb] bg-white p-4">
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="text-[15px] font-black text-slate-800">G. 最近库存变动</div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('movements')}
+                    className="text-[12px] font-semibold text-blue-600 hover:text-blue-700"
+                  >
+                    查看全部
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  {recentMovements.length <= 0 && (
+                    <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-4 text-center text-[12px] text-slate-400">
+                      暂无库存变动
+                    </div>
+                  )}
+                  {recentMovements.map((row) => (
+                    <div key={row.id} className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[12px] font-semibold text-slate-800">{row.movement_type_label}</span>
+                        <span className="text-[11px] text-slate-500">{formatMovementTime(row.created_at)}</span>
+                      </div>
+                      <div className="mt-1 text-[12px] text-slate-600">
+                        Δ现货 {row.qty_delta_on_hand >= 0 ? '+' : ''}{row.qty_delta_on_hand} · Δ待补货 {row.qty_delta_backorder >= 0 ? '+' : ''}{row.qty_delta_backorder}
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-slate-500">{row.biz_ref || row.remark || '--'}</div>
+                    </div>
+                  ))}
+                </div>
+              </section>
             </aside>
-          </div>
+          </div> : <div className="grid grid-cols-[1fr_430px] gap-4">
+            <section className="rounded-2xl border border-[#e5ecfb] bg-white p-4">
+              <div className="mb-3 text-[17px] font-black text-slate-800">库存变动明细</div>
+              <div className="mb-3 grid grid-cols-5 gap-2">
+                <WarehouseStatCard label="库存SKU" value={`${(stockOverview?.inventory_sku_count ?? 0).toLocaleString()}`} />
+                <WarehouseStatCard label="总库存" value={`${(stockOverview?.total_stock_qty ?? 0).toLocaleString()} 件`} />
+                <WarehouseStatCard label="可用库存" value={`${(stockOverview?.available_stock_qty ?? 0).toLocaleString()} 件`} />
+                <WarehouseStatCard label="已占用" value={`${(stockOverview?.reserved_stock_qty ?? 0).toLocaleString()} 件`} />
+                <WarehouseStatCard
+                  label="待补货"
+                  value={`${(stockOverview?.backorder_qty ?? 0).toLocaleString()} 件`}
+                  danger={(stockOverview?.backorder_qty ?? 0) > 0}
+                />
+              </div>
+              <div className="mb-3 grid grid-cols-[180px_1fr_90px] gap-2">
+                <select
+                  value={movementTypeFilter}
+                  onChange={(e) => {
+                    setMovementTypeFilter(e.target.value);
+                    setMovementPage(1);
+                  }}
+                  className="h-9 rounded-lg border border-slate-200 px-3 text-[13px] text-slate-700"
+                >
+                  <option value="all">全部类型</option>
+                  <option value="purchase_in">采购入库</option>
+                  <option value="order_reserve">订单占用</option>
+                  <option value="order_ship">订单发货</option>
+                  <option value="cancel_release">取消释放</option>
+                  <option value="restock_fill">补货冲减</option>
+                </select>
+                <input
+                  value={movementKeywordInput}
+                  onChange={(e) => setMovementKeywordInput(e.target.value)}
+                  placeholder="搜索业务单号/备注"
+                  className="h-9 rounded-lg border border-slate-200 px-3 text-[13px] text-slate-700 placeholder:text-slate-400"
+                />
+                <button
+                  type="button"
+                  onClick={applyMovementFilter}
+                  className="h-9 rounded-lg border border-blue-200 bg-blue-50 text-[13px] font-semibold text-blue-700 hover:bg-blue-100"
+                >
+                  查询
+                </button>
+              </div>
+
+              <div className="overflow-hidden rounded-xl border border-slate-100">
+                <table className="w-full text-left text-[12px]">
+                  <thead className="bg-slate-50 text-slate-500">
+                    <tr>
+                      <th className="px-2 py-2">时间</th>
+                      <th className="px-2 py-2">类型</th>
+                      <th className="px-2 py-2">Δ现货</th>
+                      <th className="px-2 py-2">Δ预占</th>
+                      <th className="px-2 py-2">Δ待补货</th>
+                      <th className="px-2 py-2">业务关联</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {movements.length <= 0 && (
+                      <tr>
+                        <td colSpan={6} className="px-2 py-8 text-center text-slate-400">暂无库存变动数据</td>
+                      </tr>
+                    )}
+                    {movements.map((row) => (
+                      <tr key={row.id} className="border-t border-slate-100 text-slate-700">
+                        <td className="px-2 py-2">{formatMovementTime(row.created_at)}</td>
+                        <td className="px-2 py-2">{row.movement_type_label}</td>
+                        <td className={`px-2 py-2 ${row.qty_delta_on_hand > 0 ? 'text-emerald-600' : row.qty_delta_on_hand < 0 ? 'text-rose-600' : ''}`}>
+                          {row.qty_delta_on_hand > 0 ? '+' : ''}{row.qty_delta_on_hand}
+                        </td>
+                        <td className={`px-2 py-2 ${row.qty_delta_reserved > 0 ? 'text-emerald-600' : row.qty_delta_reserved < 0 ? 'text-rose-600' : ''}`}>
+                          {row.qty_delta_reserved > 0 ? '+' : ''}{row.qty_delta_reserved}
+                        </td>
+                        <td className={`px-2 py-2 ${row.qty_delta_backorder > 0 ? 'text-rose-600' : row.qty_delta_backorder < 0 ? 'text-emerald-600' : ''}`}>
+                          {row.qty_delta_backorder > 0 ? '+' : ''}{row.qty_delta_backorder}
+                        </td>
+                        <td className="px-2 py-2">{row.biz_ref || row.remark || '--'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="mt-3 flex items-center justify-end gap-2 text-[12px]">
+                <button
+                  type="button"
+                  disabled={movementPage <= 1}
+                  onClick={() => setMovementPage((p) => Math.max(1, p - 1))}
+                  className="h-8 rounded border border-slate-200 px-3 text-slate-600 disabled:opacity-40"
+                >
+                  上一页
+                </button>
+                <span className="text-slate-500">第 {movementPage} / {movementTotalPage} 页</span>
+                <button
+                  type="button"
+                  disabled={movementPage >= movementTotalPage}
+                  onClick={() => setMovementPage((p) => Math.min(movementTotalPage, p + 1))}
+                  className="h-8 rounded border border-slate-200 px-3 text-slate-600 disabled:opacity-40"
+                >
+                  下一页
+                </button>
+              </div>
+            </section>
+
+            <aside className="space-y-4">
+              <section className="rounded-2xl border border-[#e5ecfb] bg-white p-4">
+                <div className="mb-2 text-[15px] font-black text-slate-800">最近5条（预览）</div>
+                <div className="space-y-2">
+                  {recentMovements.length <= 0 && (
+                    <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-4 text-center text-[12px] text-slate-400">
+                      暂无库存变动
+                    </div>
+                  )}
+                  {recentMovements.map((row) => (
+                    <div key={row.id} className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[12px] font-semibold text-slate-800">{row.movement_type_label}</span>
+                        <span className="text-[11px] text-slate-500">{formatMovementTime(row.created_at)}</span>
+                      </div>
+                      <div className="mt-1 text-[11px] text-slate-600">{row.biz_ref || row.remark || '--'}</div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </aside>
+          </div>}
         </main>
       </div>
     </div>
@@ -928,6 +1305,23 @@ function RealMalaysiaMap({
         <div className="inline-flex items-center gap-1 ml-2"><span className="inline-block h-2.5 w-2.5 rounded-full bg-amber-500/80" />买家热区</div>
         <div className="inline-flex items-center gap-1 ml-2"><span className="inline-block h-2.5 w-2.5 rounded-full bg-blue-500/90" />热区连线</div>
       </div>
+    </div>
+  );
+}
+
+function WarehouseStatCard({
+  label,
+  value,
+  danger,
+}: {
+  label: string;
+  value: string;
+  danger?: boolean;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+      <div className="text-[12px] text-slate-500">{label}</div>
+      <div className={`mt-1 text-[16px] font-black ${danger ? 'text-rose-600' : 'text-slate-800'}`}>{value}</div>
     </div>
   );
 }

@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.security import get_current_user
@@ -13,12 +13,16 @@ from app.models import (
     GameRun,
     GameRunCashAdjustment,
     InventoryLot,
+    InventoryStockMovement,
     LogisticsShipment,
     LogisticsShipmentOrder,
     MarketProduct,
     ProcurementOrder,
     ProcurementOrderItem,
     SimBuyerProfile,
+    ShopeeListing,
+    ShopeeListingVariant,
+    ShopeeOrder,
     ShopeeOrderGenerationLog,
     User,
     WarehouseInboundOrder,
@@ -26,12 +30,213 @@ from app.models import (
     WarehouseStrategy,
 )
 from app.services.shopee_order_simulator import simulate_orders_for_run
-from app.services.shopee_order_cancellation import auto_cancel_overdue_orders_by_tick
+from app.services.shopee_order_cancellation import auto_cancel_overdue_orders_by_tick, calc_cancel_prob
+from app.services.inventory_lot_sync import reserve_inventory_lots
 
 
 router = APIRouter(prefix="/game", tags=["game"])
 REAL_SECONDS_PER_GAME_DAY = 30 * 60
 BOOKED_SECONDS = 10
+STOCK_MOVEMENT_LABELS = {
+    "purchase_in": "采购入库",
+    "order_reserve": "订单占用",
+    "order_ship": "订单发货",
+    "cancel_release": "取消释放",
+    "restock_fill": "补货冲减",
+}
+
+
+def _append_inventory_stock_movement(
+    db: Session,
+    *,
+    run_id: int,
+    user_id: int,
+    movement_type: str,
+    qty_delta_on_hand: int = 0,
+    qty_delta_reserved: int = 0,
+    qty_delta_backorder: int = 0,
+    product_id: int | None = None,
+    listing_id: int | None = None,
+    variant_id: int | None = None,
+    inventory_lot_id: int | None = None,
+    biz_order_id: int | None = None,
+    biz_ref: str | None = None,
+    remark: str | None = None,
+) -> None:
+    db.add(
+        InventoryStockMovement(
+            run_id=run_id,
+            user_id=user_id,
+            product_id=product_id,
+            listing_id=listing_id,
+            variant_id=variant_id,
+            inventory_lot_id=inventory_lot_id,
+            biz_order_id=biz_order_id,
+            movement_type=movement_type,
+            qty_delta_on_hand=qty_delta_on_hand,
+            qty_delta_reserved=qty_delta_reserved,
+            qty_delta_backorder=qty_delta_backorder,
+            biz_ref=biz_ref,
+            remark=remark,
+        )
+    )
+
+
+def _apply_inbound_to_shopee_inventory_and_backorders(
+    db: Session,
+    *,
+    run_id: int,
+    user_id: int,
+    product_inbound_qty_map: dict[int, int],
+) -> None:
+    if not product_inbound_qty_map:
+        return
+
+    changed_listing_ids: set[int] = set()
+    product_ids = [pid for pid, qty in product_inbound_qty_map.items() if int(qty or 0) > 0]
+    if not product_ids:
+        return
+
+    product_listings = (
+        db.query(ShopeeListing)
+        .filter(
+            ShopeeListing.run_id == run_id,
+            ShopeeListing.user_id == user_id,
+            ShopeeListing.product_id.in_(product_ids),
+        )
+        .order_by(ShopeeListing.id.asc())
+        .all()
+    )
+    product_listing_map: dict[int, list[ShopeeListing]] = {}
+    for row in product_listings:
+        if row.product_id is None:
+            continue
+        product_listing_map.setdefault(int(row.product_id), []).append(row)
+
+    variants = (
+        db.query(ShopeeListingVariant)
+        .join(ShopeeListing, ShopeeListing.id == ShopeeListingVariant.listing_id)
+        .filter(
+            ShopeeListing.run_id == run_id,
+            ShopeeListing.user_id == user_id,
+            ShopeeListing.product_id.in_(product_ids),
+        )
+        .order_by(ShopeeListing.id.asc(), ShopeeListingVariant.sort_order.asc(), ShopeeListingVariant.id.asc())
+        .all()
+    )
+    listing_variants_map: dict[int, list[ShopeeListingVariant]] = {}
+    variant_map: dict[int, ShopeeListingVariant] = {}
+    product_variant_map: dict[int, list[ShopeeListingVariant]] = {}
+    for row in variants:
+        variant_map[row.id] = row
+        listing_variants_map.setdefault(int(row.listing_id), []).append(row)
+        if row.listing and row.listing.product_id is not None:
+            product_variant_map.setdefault(int(row.listing.product_id), []).append(row)
+
+    for product_id in product_ids:
+        remaining = max(0, int(product_inbound_qty_map.get(product_id) or 0))
+        if remaining <= 0:
+            continue
+
+        backlog_orders = (
+            db.query(ShopeeOrder)
+            .join(ShopeeListing, ShopeeListing.id == ShopeeOrder.listing_id)
+            .filter(
+                ShopeeOrder.run_id == run_id,
+                ShopeeOrder.user_id == user_id,
+                ShopeeOrder.type_bucket == "toship",
+                ShopeeOrder.stock_fulfillment_status == "backorder",
+                ShopeeOrder.backorder_qty > 0,
+                ShopeeListing.product_id == product_id,
+            )
+            .order_by(ShopeeOrder.created_at.asc(), ShopeeOrder.id.asc())
+            .all()
+        )
+
+        for order in backlog_orders:
+            if remaining <= 0:
+                break
+            needed = max(0, int(order.backorder_qty or 0))
+            if needed <= 0:
+                continue
+            plan_fill_qty = min(remaining, needed)
+            if plan_fill_qty <= 0:
+                continue
+            reserved_fill_qty = reserve_inventory_lots(
+                db,
+                run_id=run_id,
+                product_id=product_id,
+                qty=plan_fill_qty,
+            )
+            if reserved_fill_qty <= 0:
+                continue
+            remaining -= reserved_fill_qty
+            order.backorder_qty = needed - reserved_fill_qty
+            if order.backorder_qty <= 0:
+                order.backorder_qty = 0
+                order.stock_fulfillment_status = "restocked"
+                order.must_restock_before_at = None
+            matched_variant = variant_map.get(int(order.variant_id or 0))
+            if matched_variant:
+                matched_variant.oversell_used = max(0, int(matched_variant.oversell_used or 0) - reserved_fill_qty)
+                changed_listing_ids.add(int(matched_variant.listing_id))
+            if int(order.listing_id or 0) > 0:
+                changed_listing_ids.add(int(order.listing_id))
+            _append_inventory_stock_movement(
+                db,
+                run_id=run_id,
+                user_id=user_id,
+                movement_type="restock_fill",
+                qty_delta_on_hand=0,
+                qty_delta_reserved=reserved_fill_qty,
+                qty_delta_backorder=-reserved_fill_qty,
+                product_id=product_id,
+                listing_id=int(order.listing_id or 0) or None,
+                variant_id=int(order.variant_id or 0) or None,
+                biz_order_id=order.id,
+                biz_ref=order.order_no,
+                remark="Step04入库后自动冲减待补货缺口",
+            )
+
+        if remaining <= 0:
+            continue
+
+        candidate_variants = list(product_variant_map.get(product_id, []))
+        if not candidate_variants:
+            listings_without_variants = [
+                row
+                for row in product_listing_map.get(product_id, [])
+                if not list(row.variants or [])
+            ]
+            if listings_without_variants:
+                per_listing = remaining // len(listings_without_variants)
+                mod_listing = remaining % len(listings_without_variants)
+                for idx, row in enumerate(listings_without_variants):
+                    add_qty = per_listing + (1 if idx < mod_listing else 0)
+                    if add_qty <= 0:
+                        continue
+                    row.stock_available = max(0, int(row.stock_available or 0) + add_qty)
+                    changed_listing_ids.add(int(row.id))
+            continue
+
+        cnt = len(candidate_variants)
+        base = remaining // cnt
+        mod = remaining % cnt
+        for idx, row in enumerate(candidate_variants):
+            add_qty = base + (1 if idx < mod else 0)
+            if add_qty <= 0:
+                continue
+            row.stock = max(0, int(row.stock or 0) + add_qty)
+            changed_listing_ids.add(int(row.listing_id))
+
+    if changed_listing_ids:
+        affected_listings = (
+            db.query(ShopeeListing)
+            .filter(ShopeeListing.id.in_(list(changed_listing_ids)))
+            .all()
+        )
+        for listing in affected_listings:
+            listing.stock_available = int(sum(max(0, int(v.stock or 0)) for v in list(listing.variants or [])))
 
 
 class CreateRunRequest(BaseModel):
@@ -156,6 +361,12 @@ class LogisticsCreateShipmentResponse(BaseModel):
     remaining_cash: float
 
 
+class LogisticsDebugAccelerateResponse(BaseModel):
+    shipment_id: int
+    status: str
+    created_at: datetime
+
+
 class WarehouseInboundCandidateItem(BaseModel):
     shipment_id: int
     cargo_value: int
@@ -232,6 +443,61 @@ class WarehouseSummaryResponse(BaseModel):
     completed_inbound_count: int
     inventory_total_quantity: int
     inventory_total_sku: int
+
+
+class WarehouseStockOverviewResponse(BaseModel):
+    inventory_sku_count: int
+    total_stock_qty: int
+    available_stock_qty: int
+    reserved_stock_qty: int
+    backorder_qty: int
+    locked_stock_qty: int
+
+
+class WarehouseStockMovementItemResponse(BaseModel):
+    id: int
+    movement_type: str
+    movement_type_label: str
+    qty_delta_on_hand: int
+    qty_delta_reserved: int
+    qty_delta_backorder: int
+    product_id: int | None
+    listing_id: int | None
+    variant_id: int | None
+    biz_order_id: int | None
+    biz_ref: str | None
+    remark: str | None
+    created_at: datetime
+
+
+class WarehouseStockMovementsResponse(BaseModel):
+    page: int
+    page_size: int
+    total: int
+    rows: list[WarehouseStockMovementItemResponse]
+
+
+class WarehouseBackorderRiskItemResponse(BaseModel):
+    listing_id: int | None
+    variant_id: int | None
+    title: str
+    sku: str | None
+    pending_order_count: int
+    backorder_qty_total: int
+    overdue_order_count: int
+    urgent_24h_order_count: int
+    nearest_deadline_at: datetime | None
+    estimated_cancel_amount: float
+
+
+class WarehouseBackorderRiskOverviewResponse(BaseModel):
+    current_tick: datetime
+    affected_order_count: int
+    backorder_qty_total: int
+    overdue_order_count: int
+    urgent_24h_order_count: int
+    estimated_cancel_amount_total: float
+    top_items: list[WarehouseBackorderRiskItemResponse]
 
 
 class AdminBuyerPoolProfileResponse(BaseModel):
@@ -1229,6 +1495,42 @@ def create_logistics_shipment(
     )
 
 
+@router.post("/runs/{run_id}/logistics/shipments/{shipment_id}/debug/accelerate-clearance", response_model=LogisticsDebugAccelerateResponse)
+def debug_accelerate_logistics_clearance(
+    run_id: int,
+    shipment_id: int,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> LogisticsDebugAccelerateResponse:
+    run = _get_owned_running_run_or_404(db, run_id=run_id, user_id=current_user["id"])
+    shipment = (
+        db.query(LogisticsShipment)
+        .filter(
+            LogisticsShipment.id == shipment_id,
+            LogisticsShipment.run_id == run.id,
+        )
+        .first()
+    )
+    if not shipment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shipment not found")
+
+    created_ref = shipment.created_at
+    now = datetime.now(tz=created_ref.tzinfo) if created_ref.tzinfo is not None else datetime.utcnow()
+    transport_seconds = max(1, int(shipment.transport_days * REAL_SECONDS_PER_GAME_DAY))
+    customs_seconds = max(1, int(shipment.customs_days * REAL_SECONDS_PER_GAME_DAY))
+    total_seconds = BOOKED_SECONDS + transport_seconds + customs_seconds
+    shipment.created_at = now - timedelta(seconds=total_seconds + 1)
+
+    db.commit()
+    db.refresh(shipment)
+    status_now = _calc_shipment_status(shipment, datetime.utcnow())
+    return LogisticsDebugAccelerateResponse(
+        shipment_id=shipment.id,
+        status=status_now,
+        created_at=shipment.created_at,
+    )
+
+
 @router.get("/runs/{run_id}/warehouse/options", response_model=WarehouseOptionsResponse)
 def get_warehouse_options(
     run_id: int,
@@ -1466,6 +1768,7 @@ def warehouse_inbound(
     now = datetime.utcnow()
     created_inbound_count = 0
     created_lot_count = 0
+    product_inbound_qty_map: dict[int, int] = {}
 
     for shipment_id in target_ids:
         shipment = shipment_map.get(shipment_id)
@@ -1494,17 +1797,39 @@ def warehouse_inbound(
             .all()
         )
         for row in order_items:
-            db.add(
-                InventoryLot(
-                    run_id=run.id,
-                    product_id=row.product_id,
-                    inbound_order_id=inbound_order.id,
-                    quantity_available=row.quantity,
-                    quantity_locked=0,
-                    unit_cost=row.unit_price,
-                )
+            lot = InventoryLot(
+                run_id=run.id,
+                product_id=row.product_id,
+                inbound_order_id=inbound_order.id,
+                quantity_available=row.quantity,
+                quantity_locked=0,
+                unit_cost=row.unit_price,
+            )
+            db.add(lot)
+            db.flush()
+            qty_val = max(0, int(row.quantity or 0))
+            product_inbound_qty_map[int(row.product_id)] = product_inbound_qty_map.get(int(row.product_id), 0) + qty_val
+            _append_inventory_stock_movement(
+                db,
+                run_id=run.id,
+                user_id=current_user["id"],
+                movement_type="purchase_in",
+                qty_delta_on_hand=qty_val,
+                qty_delta_reserved=0,
+                qty_delta_backorder=0,
+                product_id=int(row.product_id),
+                inventory_lot_id=int(lot.id),
+                biz_ref=f"inbound:{inbound_order.id}",
+                remark="Step04入库创建库存批次",
             )
             created_lot_count += 1
+
+    _apply_inbound_to_shopee_inventory_and_backorders(
+        db,
+        run_id=run.id,
+        user_id=current_user["id"],
+        product_inbound_qty_map=product_inbound_qty_map,
+    )
 
     db.commit()
 
@@ -1572,4 +1897,251 @@ def get_warehouse_summary(
         completed_inbound_count=int(completed_count),
         inventory_total_quantity=int(inventory_total_quantity),
         inventory_total_sku=int(inventory_total_sku),
+    )
+
+
+@router.get("/runs/{run_id}/warehouse/stock-overview", response_model=WarehouseStockOverviewResponse)
+def get_warehouse_stock_overview(
+    run_id: int,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> WarehouseStockOverviewResponse:
+    run = _get_owned_running_run_or_404(db, run_id=run_id, user_id=current_user["id"])
+
+    totals = (
+        db.query(
+            func.coalesce(func.sum(InventoryLot.quantity_available), 0),
+            func.coalesce(func.sum(InventoryLot.reserved_qty), 0),
+            func.coalesce(func.sum(InventoryLot.backorder_qty), 0),
+            func.coalesce(func.sum(InventoryLot.quantity_locked), 0),
+            func.coalesce(func.count(func.distinct(InventoryLot.product_id)), 0),
+        )
+        .filter(InventoryLot.run_id == run.id)
+        .first()
+    )
+    available_stock_qty = int(totals[0] or 0)
+    reserved_stock_qty = int(totals[1] or 0)
+    backorder_qty = int(totals[2] or 0)
+    locked_stock_qty = int(totals[3] or 0)
+    inventory_sku_count = int(totals[4] or 0)
+    total_stock_qty = max(0, available_stock_qty + reserved_stock_qty + locked_stock_qty)
+
+    return WarehouseStockOverviewResponse(
+        inventory_sku_count=inventory_sku_count,
+        total_stock_qty=total_stock_qty,
+        available_stock_qty=available_stock_qty,
+        reserved_stock_qty=reserved_stock_qty,
+        backorder_qty=backorder_qty,
+        locked_stock_qty=locked_stock_qty,
+    )
+
+
+@router.get("/runs/{run_id}/warehouse/stock-movements", response_model=WarehouseStockMovementsResponse)
+def get_warehouse_stock_movements(
+    run_id: int,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    movement_type: str | None = Query(None),
+    keyword: str | None = Query(None, max_length=64),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> WarehouseStockMovementsResponse:
+    run = _get_owned_running_run_or_404(db, run_id=run_id, user_id=current_user["id"])
+
+    q = db.query(InventoryStockMovement).filter(
+        InventoryStockMovement.run_id == run.id,
+        InventoryStockMovement.user_id == current_user["id"],
+    )
+
+    movement_type_val = (movement_type or "").strip()
+    if movement_type_val and movement_type_val != "all":
+        q = q.filter(InventoryStockMovement.movement_type == movement_type_val)
+
+    keyword_val = (keyword or "").strip()
+    if keyword_val:
+        q = q.filter(
+            or_(
+                InventoryStockMovement.biz_ref.like(f"%{keyword_val}%"),
+                InventoryStockMovement.remark.like(f"%{keyword_val}%"),
+            )
+        )
+
+    total = int(q.count())
+    rows = (
+        q.order_by(InventoryStockMovement.created_at.desc(), InventoryStockMovement.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    return WarehouseStockMovementsResponse(
+        page=page,
+        page_size=page_size,
+        total=total,
+        rows=[
+            WarehouseStockMovementItemResponse(
+                id=int(row.id),
+                movement_type=str(row.movement_type),
+                movement_type_label=STOCK_MOVEMENT_LABELS.get(str(row.movement_type), str(row.movement_type)),
+                qty_delta_on_hand=int(row.qty_delta_on_hand or 0),
+                qty_delta_reserved=int(row.qty_delta_reserved or 0),
+                qty_delta_backorder=int(row.qty_delta_backorder or 0),
+                product_id=int(row.product_id) if row.product_id is not None else None,
+                listing_id=int(row.listing_id) if row.listing_id is not None else None,
+                variant_id=int(row.variant_id) if row.variant_id is not None else None,
+                biz_order_id=int(row.biz_order_id) if row.biz_order_id is not None else None,
+                biz_ref=row.biz_ref,
+                remark=row.remark,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ],
+    )
+
+
+@router.get("/runs/{run_id}/warehouse/backorder-risk", response_model=WarehouseBackorderRiskOverviewResponse)
+def get_warehouse_backorder_risk_overview(
+    run_id: int,
+    top_n: int = Query(5, ge=1, le=20),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> WarehouseBackorderRiskOverviewResponse:
+    run = _get_owned_running_run_or_404(db, run_id=run_id, user_id=current_user["id"])
+
+    current_tick = (
+        db.query(ShopeeOrderGenerationLog.tick_time)
+        .filter(
+            ShopeeOrderGenerationLog.run_id == run.id,
+            ShopeeOrderGenerationLog.user_id == current_user["id"],
+        )
+        .order_by(ShopeeOrderGenerationLog.tick_time.desc(), ShopeeOrderGenerationLog.id.desc())
+        .limit(1)
+        .scalar()
+    ) or datetime.utcnow()
+
+    orders = (
+        db.query(ShopeeOrder)
+        .filter(
+            ShopeeOrder.run_id == run.id,
+            ShopeeOrder.user_id == current_user["id"],
+            ShopeeOrder.type_bucket == "toship",
+            ShopeeOrder.stock_fulfillment_status == "backorder",
+            ShopeeOrder.backorder_qty > 0,
+        )
+        .all()
+    )
+    if not orders:
+        return WarehouseBackorderRiskOverviewResponse(
+            current_tick=current_tick,
+            affected_order_count=0,
+            backorder_qty_total=0,
+            overdue_order_count=0,
+            urgent_24h_order_count=0,
+            estimated_cancel_amount_total=0.0,
+            top_items=[],
+        )
+
+    listing_ids = {int(o.listing_id) for o in orders if o.listing_id is not None}
+    variant_ids = {int(o.variant_id) for o in orders if o.variant_id is not None}
+    listing_map: dict[int, ShopeeListing] = {}
+    variant_map: dict[int, ShopeeListingVariant] = {}
+    if listing_ids:
+        listing_rows = db.query(ShopeeListing).filter(ShopeeListing.id.in_(list(listing_ids))).all()
+        listing_map = {int(row.id): row for row in listing_rows}
+    if variant_ids:
+        variant_rows = db.query(ShopeeListingVariant).filter(ShopeeListingVariant.id.in_(list(variant_ids))).all()
+        variant_map = {int(row.id): row for row in variant_rows}
+
+    affected_order_count = len(orders)
+    backorder_qty_total = 0
+    overdue_order_count = 0
+    urgent_24h_order_count = 0
+    estimated_cancel_amount_total = 0.0
+    grouped: dict[tuple[int | None, int | None], dict[str, Any]] = {}
+
+    for order in orders:
+        order_backorder_qty = max(0, int(order.backorder_qty or 0))
+        backorder_qty_total += order_backorder_qty
+
+        deadline = order.must_restock_before_at or order.ship_by_at
+        overdue_hours = 0
+        if deadline and current_tick > deadline:
+            overdue_hours = max(0, int((current_tick - deadline).total_seconds() // 3600))
+            if overdue_hours > 0:
+                overdue_order_count += 1
+        elif deadline:
+            remaining_hours = int((deadline - current_tick).total_seconds() // 3600)
+            if remaining_hours <= 24:
+                urgent_24h_order_count += 1
+
+        risk_prob = calc_cancel_prob(overdue_hours)
+        estimated_cancel_amount = round(float(order.buyer_payment or 0) * float(risk_prob), 2)
+        estimated_cancel_amount_total += estimated_cancel_amount
+
+        key = (
+            int(order.listing_id) if order.listing_id is not None else None,
+            int(order.variant_id) if order.variant_id is not None else None,
+        )
+        listing_row = listing_map.get(key[0]) if key[0] is not None else None
+        variant_row = variant_map.get(key[1]) if key[1] is not None else None
+        title = (
+            (listing_row.title or "").strip()
+            if listing_row
+            else (order.items[0].product_name if order.items else order.order_no)
+        ) or order.order_no
+        sku = (variant_row.sku_code or "").strip() if variant_row and variant_row.sku_code else None
+
+        if key not in grouped:
+            grouped[key] = {
+                "listing_id": key[0],
+                "variant_id": key[1],
+                "title": title,
+                "sku": sku,
+                "pending_order_count": 0,
+                "backorder_qty_total": 0,
+                "overdue_order_count": 0,
+                "urgent_24h_order_count": 0,
+                "nearest_deadline_at": deadline,
+                "estimated_cancel_amount": 0.0,
+            }
+        bucket = grouped[key]
+        bucket["pending_order_count"] += 1
+        bucket["backorder_qty_total"] += order_backorder_qty
+        bucket["estimated_cancel_amount"] += estimated_cancel_amount
+        if overdue_hours > 0:
+            bucket["overdue_order_count"] += 1
+        elif deadline and int((deadline - current_tick).total_seconds() // 3600) <= 24:
+            bucket["urgent_24h_order_count"] += 1
+        nearest_deadline = bucket.get("nearest_deadline_at")
+        if nearest_deadline is None or (deadline is not None and deadline < nearest_deadline):
+            bucket["nearest_deadline_at"] = deadline
+
+    top_rows = sorted(
+        grouped.values(),
+        key=lambda x: (int(x["backorder_qty_total"]), float(x["estimated_cancel_amount"])),
+        reverse=True,
+    )[:top_n]
+
+    return WarehouseBackorderRiskOverviewResponse(
+        current_tick=current_tick,
+        affected_order_count=affected_order_count,
+        backorder_qty_total=backorder_qty_total,
+        overdue_order_count=overdue_order_count,
+        urgent_24h_order_count=urgent_24h_order_count,
+        estimated_cancel_amount_total=round(estimated_cancel_amount_total, 2),
+        top_items=[
+            WarehouseBackorderRiskItemResponse(
+                listing_id=row["listing_id"],
+                variant_id=row["variant_id"],
+                title=row["title"],
+                sku=row["sku"],
+                pending_order_count=int(row["pending_order_count"]),
+                backorder_qty_total=int(row["backorder_qty_total"]),
+                overdue_order_count=int(row["overdue_order_count"]),
+                urgent_24h_order_count=int(row["urgent_24h_order_count"]),
+                nearest_deadline_at=row["nearest_deadline_at"],
+                estimated_cancel_amount=round(float(row["estimated_cancel_amount"]), 2),
+            )
+            for row in top_rows
+        ],
     )

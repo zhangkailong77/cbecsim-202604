@@ -249,7 +249,10 @@ class InventoryLot(Base):
     inbound_order_id: Mapped[int] = mapped_column(ForeignKey("warehouse_inbound_orders.id"), nullable=False, index=True)
     quantity_available: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     quantity_locked: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reserved_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    backorder_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     unit_cost: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_restocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -257,6 +260,31 @@ class InventoryLot(Base):
     )
 
     inbound_order = relationship("WarehouseInboundOrder", back_populates="inventory_lots")
+
+
+class InventoryStockMovement(Base):
+    __tablename__ = "inventory_stock_movements"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("game_runs.id"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("market_products.id"), nullable=True, index=True)
+    listing_id: Mapped[int | None] = mapped_column(ForeignKey("shopee_listings.id"), nullable=True, index=True)
+    variant_id: Mapped[int | None] = mapped_column(ForeignKey("shopee_listing_variants.id"), nullable=True, index=True)
+    inventory_lot_id: Mapped[int | None] = mapped_column(ForeignKey("inventory_lots.id"), nullable=True, index=True)
+    biz_order_id: Mapped[int | None] = mapped_column(ForeignKey("shopee_orders.id"), nullable=True, index=True)
+    movement_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    qty_delta_on_hand: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    qty_delta_reserved: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    qty_delta_backorder: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    biz_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    remark: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
 
 
 class ShopeeListing(Base):
@@ -501,6 +529,8 @@ class ShopeeListingVariant(Base):
     price: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     stock: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     sales_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    oversell_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=2000)
+    oversell_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     sku: Mapped[str | None] = mapped_column(String(64), nullable=True)
     gtin: Mapped[str | None] = mapped_column(String(64), nullable=True)
     item_without_gtin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -559,8 +589,13 @@ class ShopeeOrder(Base):
     buyer_name: Mapped[str] = mapped_column(String(64), nullable=False)
     buyer_payment: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     order_type: Mapped[str] = mapped_column(String(24), nullable=False, default="order", index=True)
+    listing_id: Mapped[int | None] = mapped_column(ForeignKey("shopee_listings.id"), nullable=True, index=True)
+    variant_id: Mapped[int | None] = mapped_column(ForeignKey("shopee_listing_variants.id"), nullable=True, index=True)
     type_bucket: Mapped[str] = mapped_column(String(24), nullable=False, default="toship", index=True)
     process_status: Mapped[str] = mapped_column(String(24), nullable=False, default="processing", index=True)
+    stock_fulfillment_status: Mapped[str] = mapped_column(String(24), nullable=False, default="in_stock", index=True)
+    backorder_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    must_restock_before_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     shipping_priority: Mapped[str] = mapped_column(String(24), nullable=False, default="today", index=True)
     shipping_channel: Mapped[str] = mapped_column(String(64), nullable=False, default="SPX快递")
     delivery_line_key: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)

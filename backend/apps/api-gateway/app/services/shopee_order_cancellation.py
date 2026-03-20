@@ -6,7 +6,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models import ShopeeListing, ShopeeListingVariant, ShopeeOrder, ShopeeOrderLogisticsEvent
+from app.models import InventoryStockMovement, ShopeeListing, ShopeeListingVariant, ShopeeOrder, ShopeeOrderLogisticsEvent
+from app.services.inventory_lot_sync import release_reserved_inventory_lots
 
 
 CANCEL_THRESHOLD_HOURS = 48
@@ -36,27 +37,47 @@ def _rollback_order_stock_and_sales(
             continue
         product_name = (item.product_name or "").strip()
         variant_name = (item.variant_name or "").strip()
-        if not product_name:
-            continue
 
-        listing = (
-            db.query(ShopeeListing)
-            .filter(
-                ShopeeListing.run_id == run_id,
-                ShopeeListing.user_id == user_id,
-                ShopeeListing.title == product_name,
+        listing: ShopeeListing | None = None
+        if int(order.listing_id or 0) > 0:
+            listing = (
+                db.query(ShopeeListing)
+                .filter(
+                    ShopeeListing.run_id == run_id,
+                    ShopeeListing.user_id == user_id,
+                    ShopeeListing.id == int(order.listing_id),
+                )
+                .first()
             )
-            .order_by(ShopeeListing.id.desc())
-            .first()
-        )
+        if not listing and product_name:
+            listing = (
+                db.query(ShopeeListing)
+                .filter(
+                    ShopeeListing.run_id == run_id,
+                    ShopeeListing.user_id == user_id,
+                    ShopeeListing.title == product_name,
+                )
+                .order_by(ShopeeListing.id.desc())
+                .first()
+            )
         if not listing:
             continue
 
+        product_id = int(listing.product_id or 0) if listing.product_id is not None else 0
         listing.sales_count = max(0, int(listing.sales_count or 0) - qty)
         variants = list(listing.variants or [])
         if variants:
             matched_variant: ShopeeListingVariant | None = None
-            if variant_name:
+            if int(order.variant_id or 0) > 0:
+                matched_variant = (
+                    db.query(ShopeeListingVariant)
+                    .filter(
+                        ShopeeListingVariant.listing_id == listing.id,
+                        ShopeeListingVariant.id == int(order.variant_id),
+                    )
+                    .first()
+                )
+            if not matched_variant and variant_name:
                 matched_variant = (
                     db.query(ShopeeListingVariant)
                     .filter(
@@ -67,11 +88,65 @@ def _rollback_order_stock_and_sales(
                     .first()
                 )
             if matched_variant:
-                matched_variant.stock = max(0, int(matched_variant.stock or 0) + qty)
+                backorder_from_order = max(0, int(order.backorder_qty or 0))
+                oversell_release = min(qty, backorder_from_order)
+                stock_release = max(0, qty - oversell_release)
+                released_reserved = 0
+                if product_id > 0 and stock_release > 0:
+                    released_reserved = release_reserved_inventory_lots(
+                        db,
+                        run_id=run_id,
+                        product_id=product_id,
+                        qty=stock_release,
+                    )
+                matched_variant.stock = max(0, int(matched_variant.stock or 0) + stock_release)
                 matched_variant.sales_count = max(0, int(matched_variant.sales_count or 0) - qty)
+                matched_variant.oversell_used = max(0, int(matched_variant.oversell_used or 0) - oversell_release)
+                db.add(
+                    InventoryStockMovement(
+                        run_id=run_id,
+                        user_id=user_id,
+                        product_id=int(listing.product_id) if listing.product_id is not None else None,
+                        listing_id=int(listing.id),
+                        variant_id=int(matched_variant.id),
+                        biz_order_id=int(order.id),
+                        movement_type="cancel_release",
+                        qty_delta_on_hand=int(stock_release),
+                        qty_delta_reserved=-int(released_reserved),
+                        qty_delta_backorder=-int(oversell_release),
+                        biz_ref=order.order_no,
+                        remark="订单取消释放库存/回退缺货占用",
+                    )
+                )
             listing.stock_available = int(sum(max(0, int(v.stock or 0)) for v in variants))
         else:
-            listing.stock_available = max(0, int(listing.stock_available or 0) + qty)
+            backorder_from_order = max(0, int(order.backorder_qty or 0))
+            stock_release = max(0, qty - min(qty, backorder_from_order))
+            released_reserved = 0
+            if product_id > 0 and stock_release > 0:
+                released_reserved = release_reserved_inventory_lots(
+                    db,
+                    run_id=run_id,
+                    product_id=product_id,
+                    qty=stock_release,
+                )
+            listing.stock_available = max(0, int(listing.stock_available or 0) + stock_release)
+            db.add(
+                InventoryStockMovement(
+                    run_id=run_id,
+                    user_id=user_id,
+                    product_id=int(listing.product_id) if listing.product_id is not None else None,
+                    listing_id=int(listing.id),
+                    variant_id=None,
+                    biz_order_id=int(order.id),
+                    movement_type="cancel_release",
+                    qty_delta_on_hand=int(stock_release),
+                    qty_delta_reserved=-int(released_reserved),
+                    qty_delta_backorder=-int(min(qty, backorder_from_order)),
+                    biz_ref=order.order_no,
+                    remark="订单取消释放库存/回退缺货占用",
+                )
+            )
 
 
 def calc_cancel_prob(overdue_hours: int) -> float:

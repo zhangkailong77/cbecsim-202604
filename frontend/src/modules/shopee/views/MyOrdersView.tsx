@@ -34,6 +34,11 @@ interface OrderRow {
   ship_by_at?: string | null;
   tracking_no?: string | null;
   waybill_no?: string | null;
+  listing_id?: number | null;
+  variant_id?: number | null;
+  stock_fulfillment_status: 'in_stock' | 'backorder' | 'restocked' | string;
+  backorder_qty: number;
+  must_restock_before_at?: string | null;
   shipped_at?: string | null;
   delivered_at?: string | null;
   cancelled_at?: string | null;
@@ -172,6 +177,11 @@ function formatSettlementStatus(status: string) {
     settled: '已结算',
   };
   return labelMap[status] ?? status;
+}
+
+function formatBackorderDeadline(val?: string | null) {
+  if (!val) return '-';
+  return new Date(val).toLocaleString();
 }
 
 function parseApiErrorDetail(raw: string): string {
@@ -821,6 +831,18 @@ export default function MyOrdersView({ runId, onOpenOrderDetail }: MyOrdersViewP
                                 {row.type_bucket === 'cancelled' ? '已取消' : row.process_status === 'processing' ? '待处理' : '已处理'}
                               </div>
                               <div className="text-[12px] text-gray-500 mt-1">{row.countdown_text}</div>
+                              {row.type_bucket === 'toship' && (
+                                <div className="mt-1 text-[12px]">
+                                  {(row.stock_fulfillment_status || '').trim() === 'backorder' && Number(row.backorder_qty || 0) > 0 ? (
+                                    <div className="space-y-1">
+                                      <div className="inline-flex rounded bg-[#fff3ef] px-2 py-0.5 text-[#e85d04]">待补货（缺口 {row.backorder_qty} 件）</div>
+                                      <div className="text-gray-500">最晚补货：{formatBackorderDeadline(row.must_restock_before_at)}</div>
+                                    </div>
+                                  ) : (
+                                    <div className="inline-flex rounded bg-[#ecfdf3] px-2 py-0.5 text-[#0f766e]">现货可发</div>
+                                  )}
+                                </div>
+                              )}
                               {row.type_bucket === 'shipping' && (
                                 <>
                                   <div className="text-[12px] text-gray-500 mt-1">追踪号：{row.tracking_no || '-'}</div>

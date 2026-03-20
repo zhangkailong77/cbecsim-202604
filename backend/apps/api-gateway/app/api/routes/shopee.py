@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
-from sqlalchemy import asc, desc, func
+from sqlalchemy import String, asc, cast, desc, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -16,6 +16,8 @@ from app.models import (
     GameRun,
     GameRunCashAdjustment,
     LogisticsShipment,
+    InventoryLot,
+    MarketProduct,
     OssStorageConfig,
     ShopeeCategoryNode,
     ShopeeListing,
@@ -36,6 +38,7 @@ from app.models import (
     ShopeeSpecTemplate,
     ShopeeSpecTemplateOption,
     SimBuyerProfile,
+    InventoryStockMovement,
     WarehouseLandmark,
     WarehouseStrategy,
 )
@@ -50,6 +53,7 @@ from app.services.shopee_order_cancellation import (
     auto_cancel_overdue_orders_by_tick as service_auto_cancel_overdue_orders_by_tick,
     cancel_order as service_cancel_order,
 )
+from app.services.inventory_lot_sync import consume_reserved_inventory_lots
 from app.services.shopee_order_simulator import simulate_orders_for_run
 
 
@@ -100,6 +104,11 @@ class ShopeeOrderResponse(BaseModel):
     ship_by_date: datetime | None
     tracking_no: str | None = None
     waybill_no: str | None = None
+    listing_id: int | None = None
+    variant_id: int | None = None
+    stock_fulfillment_status: str
+    backorder_qty: int
+    must_restock_before_at: datetime | None = None
     ship_by_at: datetime | None = None
     shipped_at: datetime | None = None
     delivered_at: datetime | None = None
@@ -340,6 +349,8 @@ class ShopeeListingVariantPreviewResponse(BaseModel):
     price: int
     stock: int
     sales_count: int
+    oversell_limit: int
+    oversell_used: int
     sku: str | None
     image_url: str | None
 
@@ -408,6 +419,7 @@ class ShopeeListingEditWholesaleTierResponse(BaseModel):
 
 class ShopeeListingDetailResponse(BaseModel):
     id: int
+    product_id: int | None
     title: str
     category_id: int | None
     category: str | None
@@ -476,6 +488,22 @@ class ShopeeDraftPublishResponse(BaseModel):
     draft_id: int
     listing_id: int
     status: str
+
+
+class ShopeeWarehouseLinkProductRowResponse(BaseModel):
+    product_id: int
+    product_name: str
+    available_qty: int
+    reserved_qty: int
+    backorder_qty: int
+    inbound_lot_count: int
+
+
+class ShopeeWarehouseLinkProductsResponse(BaseModel):
+    page: int
+    page_size: int
+    total: int
+    rows: list[ShopeeWarehouseLinkProductRowResponse]
 
 
 class ShopeeDraftUpdatePayload(BaseModel):
@@ -1406,6 +1434,7 @@ def _build_draft_response(draft: ShopeeListingDraft) -> ShopeeDraftDetailRespons
 def _build_listing_detail_response(listing: ShopeeListing) -> ShopeeListingDetailResponse:
     return ShopeeListingDetailResponse(
         id=listing.id,
+        product_id=listing.product_id,
         title=listing.title,
         category_id=listing.category_id,
         category=listing.category,
@@ -1467,6 +1496,19 @@ def _build_listing_detail_response(listing: ShopeeListing) -> ShopeeListingDetai
             for row in sorted(listing.wholesale_tiers or [], key=lambda x: (x.tier_no, x.id))
         ],
     )
+
+
+def _validate_linkable_product_or_400(db: Session, *, run_id: int, product_id: int) -> None:
+    linked_exists = (
+        db.query(InventoryLot.id)
+        .filter(
+            InventoryLot.run_id == run_id,
+            InventoryLot.product_id == product_id,
+        )
+        .first()
+    )
+    if not linked_exists:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请选择当前海外仓已入仓商品进行关联")
 
 
 def _load_spec_templates(db: Session, category_id: int | None) -> list[ShopeeSpecTemplate]:
@@ -1688,14 +1730,15 @@ def list_shopee_orders(
         .scalar()
         or 0
     )
-    last_log = (
-        db.query(ShopeeOrderGenerationLog)
+    # Avoid full-row ORDER BY on a potentially large log table.
+    # We only need the latest timestamp, so use aggregate MAX(created_at).
+    last_simulated_at = (
+        db.query(func.max(ShopeeOrderGenerationLog.created_at))
         .filter(
             ShopeeOrderGenerationLog.run_id == run.id,
             ShopeeOrderGenerationLog.user_id == user_id,
         )
-        .order_by(ShopeeOrderGenerationLog.created_at.desc())
-        .first()
+        .scalar()
     )
 
     return ShopeeOrdersListResponse(
@@ -1704,7 +1747,7 @@ def list_shopee_orders(
         page_size=page_size,
         total=total,
         simulated_recent_1h=int(simulated_recent_1h),
-        last_simulated_at=last_log.created_at if last_log else None,
+        last_simulated_at=last_simulated_at,
         orders=[
             ShopeeOrderResponse(
                 **{
@@ -1724,6 +1767,11 @@ def list_shopee_orders(
                         "ship_by_date": row.ship_by_date,
                         "tracking_no": row.tracking_no,
                         "waybill_no": row.waybill_no,
+                        "listing_id": row.listing_id,
+                        "variant_id": row.variant_id,
+                        "stock_fulfillment_status": row.stock_fulfillment_status,
+                        "backorder_qty": int(row.backorder_qty or 0),
+                        "must_restock_before_at": row.must_restock_before_at,
                         "ship_by_at": row.ship_by_at,
                         "shipped_at": row.shipped_at,
                         "delivered_at": row.delivered_at,
@@ -1796,6 +1844,11 @@ def get_shopee_order_detail(
                 "ship_by_date": row.ship_by_date,
                 "tracking_no": row.tracking_no,
                 "waybill_no": row.waybill_no,
+                "listing_id": row.listing_id,
+                "variant_id": row.variant_id,
+                "stock_fulfillment_status": row.stock_fulfillment_status,
+                "backorder_qty": int(row.backorder_qty or 0),
+                "must_restock_before_at": row.must_restock_before_at,
                 "ship_by_at": row.ship_by_at,
                 "shipped_at": row.shipped_at,
                 "delivered_at": row.delivered_at,
@@ -1838,11 +1891,41 @@ def ship_order(
 
     if order.type_bucket != "toship":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="仅待出货订单可安排发货")
+    if (order.stock_fulfillment_status or "").strip() == "backorder" and int(order.backorder_qty or 0) > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="订单仍待补货，暂不可发货",
+        )
 
     allowed_channels = {"标准快递", "标准大件", "快捷快递"}
     shipping_channel = (payload.shipping_channel or order.shipping_channel or "标准快递").strip()
     if shipping_channel not in allowed_channels:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="物流渠道不合法")
+
+    listing = None
+    if int(order.listing_id or 0) > 0:
+        listing = (
+            db.query(ShopeeListing)
+            .filter(
+                ShopeeListing.run_id == run.id,
+                ShopeeListing.user_id == user_id,
+                ShopeeListing.id == int(order.listing_id),
+            )
+            .first()
+        )
+    order_ship_qty = int(sum(max(0, int(item.quantity or 0)) for item in list(order.items or [])))
+    reserved_consumed = 0
+    if listing and listing.product_id is None and order_ship_qty > 0:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="订单缺少库存商品映射，暂不可发货")
+    if listing and listing.product_id is not None and order_ship_qty > 0:
+        reserved_consumed = consume_reserved_inventory_lots(
+            db,
+            run_id=run.id,
+            product_id=int(listing.product_id),
+            qty=order_ship_qty,
+        )
+        if reserved_consumed < order_ship_qty:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="库存预占不足，订单暂不可发货")
 
     now = current_tick
     warehouse_latlng = _resolve_warehouse_latlng(db, run)
@@ -1874,6 +1957,25 @@ def ship_order(
     order.type_bucket = "shipping"
     order.process_status = "processed"
     order.countdown_text = "物流运输中"
+
+    if listing and listing.product_id is not None and reserved_consumed > 0:
+        # 发货出库：释放预占，转为已出库消耗。
+        db.add(
+            InventoryStockMovement(
+                run_id=run.id,
+                user_id=user_id,
+                product_id=int(listing.product_id),
+                listing_id=int(order.listing_id) if order.listing_id is not None else None,
+                variant_id=int(order.variant_id) if order.variant_id is not None else None,
+                biz_order_id=int(order.id),
+                movement_type="order_ship",
+                qty_delta_on_hand=0,
+                qty_delta_reserved=-int(reserved_consumed),
+                qty_delta_backorder=0,
+                biz_ref=order.order_no,
+                remark="订单发货出库（释放预占）",
+            )
+        )
 
     _apply_logistics_transition(
         db,
@@ -2604,11 +2706,75 @@ def list_shopee_products(
                         price=variant.price,
                         stock=variant.stock,
                         sales_count=int(variant.sales_count or 0),
+                        oversell_limit=int(variant.oversell_limit or 0),
+                        oversell_used=int(variant.oversell_used or 0),
                         sku=variant.sku,
                         image_url=variant.image_url,
                     )
                     for variant in sorted(row.variants or [], key=lambda x: (x.sort_order, x.id))
                 ],
+            )
+            for row in rows
+        ],
+    )
+
+
+@router.get("/runs/{run_id}/warehouse-link-products", response_model=ShopeeWarehouseLinkProductsResponse)
+def list_warehouse_link_products(
+    run_id: int,
+    keyword: str | None = Query(default=None, max_length=64),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> ShopeeWarehouseLinkProductsResponse:
+    user_id = int(current_user["id"])
+    run = _get_owned_running_run_or_404(db, run_id, user_id)
+
+    query = (
+        db.query(
+            InventoryLot.product_id.label("product_id"),
+            func.max(MarketProduct.product_name).label("product_name"),
+            func.coalesce(func.sum(InventoryLot.quantity_available), 0).label("available_qty"),
+            func.coalesce(func.sum(InventoryLot.reserved_qty), 0).label("reserved_qty"),
+            func.coalesce(func.sum(InventoryLot.backorder_qty), 0).label("backorder_qty"),
+            func.count(InventoryLot.id).label("inbound_lot_count"),
+        )
+        .join(MarketProduct, MarketProduct.id == InventoryLot.product_id)
+        .filter(InventoryLot.run_id == run.id)
+    )
+
+    kw = (keyword or "").strip()
+    if kw:
+        query = query.filter(
+            or_(
+                MarketProduct.product_name.like(f"%{kw}%"),
+                cast(InventoryLot.product_id, String).like(f"%{kw}%"),
+            )
+        )
+
+    grouped = query.group_by(InventoryLot.product_id)
+    grouped_subq = grouped.subquery()
+    total = int(db.query(func.count()).select_from(grouped_subq).scalar() or 0)
+    rows = (
+        db.query(grouped_subq)
+        .order_by(grouped_subq.c.available_qty.desc(), grouped_subq.c.product_id.asc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return ShopeeWarehouseLinkProductsResponse(
+        page=page,
+        page_size=page_size,
+        total=total,
+        rows=[
+            ShopeeWarehouseLinkProductRowResponse(
+                product_id=int(row.product_id),
+                product_name=str(row.product_name or f"商品#{row.product_id}"),
+                available_qty=int(row.available_qty or 0),
+                reserved_qty=int(row.reserved_qty or 0),
+                backorder_qty=int(row.backorder_qty or 0),
+                inbound_lot_count=int(row.inbound_lot_count or 0),
             )
             for row in rows
         ],
@@ -3094,6 +3260,7 @@ def publish_shopee_product_draft(
     condition_label: str | None = Form(default=None),
     schedule_publish_at: datetime | None = Form(default=None),
     parent_sku: str | None = Form(default=None),
+    source_product_id: int | None = Form(default=None),
     source_listing_id: int | None = Form(default=None),
     variations_payload: str | None = Form(default=None),
     wholesale_tiers_payload: str | None = Form(default=None),
@@ -3108,6 +3275,9 @@ def publish_shopee_product_draft(
     status_white_list = {"live", "unpublished"}
     keep_status = (status_value == "keep")
     final_status = status_value if status_value in status_white_list else "live"
+    requested_product_id = int(source_product_id) if source_product_id and int(source_product_id) > 0 else None
+    if requested_product_id is not None:
+        _validate_linkable_product_or_400(db, run_id=run.id, product_id=requested_product_id)
     if not draft.category_id or not (draft.category or "").strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请选择商品类目后再发布")
 
@@ -3123,6 +3293,8 @@ def publish_shopee_product_draft(
     listing: ShopeeListing
     if source_listing_id and source_listing_id > 0:
         listing = _get_owned_listing_or_404(db, source_listing_id, run.id, user_id)
+        if requested_product_id is not None:
+            listing.product_id = requested_product_id
         existing_variants = list(listing.variants or [])
         existing_variant_by_id = {v.id: v for v in existing_variants}
         existing_variant_by_sku = {str(v.sku or "").strip(): v for v in existing_variants if str(v.sku or "").strip()}
@@ -3171,10 +3343,12 @@ def publish_shopee_product_draft(
         listing.wholesale_tiers.clear()
         db.flush()
     else:
+        if final_status == "live" and requested_product_id is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请先关联仓库商品后发布")
         listing = ShopeeListing(
             run_id=run.id,
             user_id=user_id,
-            product_id=None,
+            product_id=requested_product_id,
             category_id=draft.category_id,
             title=draft.title,
             category=draft.category,
@@ -3214,6 +3388,9 @@ def publish_shopee_product_draft(
         )
         db.add(listing)
         db.flush()
+
+    if source_listing_id and source_listing_id > 0 and final_status == "live" and listing.product_id is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请先关联仓库商品后发布")
 
     for img in sorted(images_11, key=lambda row: row.sort_order):
         db.add(

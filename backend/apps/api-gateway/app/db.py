@@ -82,6 +82,7 @@ def init_database():
     Base.metadata.create_all(bind=engine)
     _ensure_users_columns()
     _ensure_market_products_columns()
+    _ensure_inventory_lots_columns()
     _ensure_shopee_listing_images_columns()
     _ensure_shopee_listing_variants_columns()
     _ensure_shopee_listing_wholesale_tiers_columns()
@@ -763,6 +764,28 @@ def _ensure_market_products_columns():
             conn.execute(text(sql))
 
 
+def _ensure_inventory_lots_columns():
+    inspector = inspect(engine)
+    if "inventory_lots" not in inspector.get_table_names():
+        return
+
+    existing_columns = {col["name"] for col in inspector.get_columns("inventory_lots")}
+    missing_sql = []
+    if "reserved_qty" not in existing_columns:
+        missing_sql.append("ALTER TABLE inventory_lots ADD COLUMN reserved_qty INTEGER NOT NULL DEFAULT 0")
+    if "backorder_qty" not in existing_columns:
+        missing_sql.append("ALTER TABLE inventory_lots ADD COLUMN backorder_qty INTEGER NOT NULL DEFAULT 0")
+    if "last_restocked_at" not in existing_columns:
+        missing_sql.append("ALTER TABLE inventory_lots ADD COLUMN last_restocked_at DATETIME NULL")
+
+    if not missing_sql:
+        return
+
+    with engine.begin() as conn:
+        for sql in missing_sql:
+            conn.execute(text(sql))
+
+
 def _ensure_shopee_listing_images_columns():
     inspector = inspect(engine)
     if "shopee_listing_images" not in inspector.get_table_names():
@@ -799,6 +822,10 @@ def _ensure_shopee_listing_variants_columns():
         missing_sql.append("ALTER TABLE shopee_listing_variants ADD COLUMN parcel_height_cm INTEGER NULL")
     if "sales_count" not in existing_columns:
         missing_sql.append("ALTER TABLE shopee_listing_variants ADD COLUMN sales_count INTEGER NOT NULL DEFAULT 0")
+    if "oversell_limit" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_listing_variants ADD COLUMN oversell_limit INTEGER NOT NULL DEFAULT 2000")
+    if "oversell_used" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_listing_variants ADD COLUMN oversell_used INTEGER NOT NULL DEFAULT 0")
 
     if not missing_sql:
         return
@@ -984,6 +1011,18 @@ def _ensure_shopee_orders_fulfillment_columns():
         missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN delivery_line_key VARCHAR(32) NULL")
     if "delivery_line_label" not in existing_columns:
         missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN delivery_line_label VARCHAR(64) NULL")
+    if "listing_id" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN listing_id INTEGER NULL")
+    if "variant_id" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN variant_id INTEGER NULL")
+    if "stock_fulfillment_status" not in existing_columns:
+        missing_sql.append(
+            "ALTER TABLE shopee_orders ADD COLUMN stock_fulfillment_status VARCHAR(24) NOT NULL DEFAULT 'in_stock'"
+        )
+    if "backorder_qty" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN backorder_qty INTEGER NOT NULL DEFAULT 0")
+    if "must_restock_before_at" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN must_restock_before_at DATETIME NULL")
 
     if not missing_sql:
         return
@@ -991,6 +1030,22 @@ def _ensure_shopee_orders_fulfillment_columns():
     with engine.begin() as conn:
         for sql in missing_sql:
             conn.execute(text(sql))
+        # Best-effort index creation for newly added fulfillment columns.
+        if "listing_id" not in existing_columns:
+            try:
+                conn.execute(text("CREATE INDEX ix_shopee_orders_listing_id ON shopee_orders (listing_id)"))
+            except Exception:
+                pass
+        if "variant_id" not in existing_columns:
+            try:
+                conn.execute(text("CREATE INDEX ix_shopee_orders_variant_id ON shopee_orders (variant_id)"))
+            except Exception:
+                pass
+        if "must_restock_before_at" not in existing_columns:
+            try:
+                conn.execute(text("CREATE INDEX ix_shopee_orders_must_restock_before_at ON shopee_orders (must_restock_before_at)"))
+            except Exception:
+                pass
 
 
 def _ensure_table_comments():
@@ -1010,6 +1065,7 @@ def _ensure_table_comments():
         "warehouse_strategies": "海外仓策略配置表",
         "warehouse_inbound_orders": "海外仓入库订单表",
         "inventory_lots": "库存批次表",
+        "inventory_stock_movements": "库存变动流水表（采购入库/订单占用/取消释放/补货冲减）",
         "shopee_listings": "Shopee 正式商品表",
         "shopee_listing_drafts": "Shopee 商品草稿主表",
         "shopee_listing_draft_images": "Shopee 草稿图片表",
@@ -1175,7 +1231,27 @@ def _ensure_column_comments():
             "inbound_order_id": "入库订单ID",
             "quantity_available": "可用库存",
             "quantity_locked": "锁定库存",
+            "reserved_qty": "预占库存数量（已被订单占用未出库）",
+            "backorder_qty": "缺货待补数量",
             "unit_cost": "单位成本",
+            "last_restocked_at": "最近补货时间",
+            "created_at": "创建时间",
+        },
+        "inventory_stock_movements": {
+            "id": "主键ID",
+            "run_id": "对局ID",
+            "user_id": "用户ID",
+            "product_id": "商品池商品ID",
+            "listing_id": "Shopee商品ID",
+            "variant_id": "Shopee变体ID",
+            "inventory_lot_id": "库存批次ID",
+            "biz_order_id": "业务订单ID",
+            "movement_type": "库存变动类型(purchase_in/order_reserve/order_ship/cancel_release/restock_fill)",
+            "qty_delta_on_hand": "现货库存变动量",
+            "qty_delta_reserved": "预占库存变动量",
+            "qty_delta_backorder": "缺货待补变动量",
+            "biz_ref": "业务单号(采购单号/订单号)",
+            "remark": "备注",
             "created_at": "创建时间",
         },
         "shopee_listings": {
@@ -1313,6 +1389,8 @@ def _ensure_column_comments():
             "price": "变体价格",
             "stock": "变体库存",
             "sales_count": "变体销量",
+            "oversell_limit": "变体超卖上限（件）",
+            "oversell_used": "变体已用超卖数量（件）",
             "sku": "变体SKU",
             "gtin": "变体GTIN",
             "item_without_gtin": "是否无GTIN",
@@ -1343,8 +1421,13 @@ def _ensure_column_comments():
             "buyer_name": "买家名称",
             "buyer_payment": "买家支付金额",
             "order_type": "订单类型",
+            "listing_id": "关联商品ID",
+            "variant_id": "关联变体ID",
             "type_bucket": "订单分组",
             "process_status": "处理状态",
+            "stock_fulfillment_status": "库存履约状态(in_stock/backorder/restocked)",
+            "backorder_qty": "待补货数量（件）",
+            "must_restock_before_at": "最晚补货时间（游戏时间）",
             "shipping_priority": "发货优先级",
             "shipping_channel": "物流渠道",
             "delivery_line_key": "履约线路键(economy/standard/express)",

@@ -9,6 +9,7 @@ from uuid import uuid4
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import (
+    InventoryStockMovement,
     ShopeeListing,
     ShopeeOrder,
     ShopeeOrderGenerationLog,
@@ -16,6 +17,9 @@ from app.models import (
     ShopeeListingVariant,
     SimBuyerProfile,
 )
+from app.services.inventory_lot_sync import release_reserved_inventory_lots, reserve_inventory_lots
+
+BACKORDER_GRACE_GAME_HOURS = 48
 
 
 def _clamp(num: float, low: float, high: float) -> float:
@@ -60,7 +64,7 @@ def _safe_load_str_list(raw: str) -> list[str]:
 def _pick_variant(listing: ShopeeListing) -> ShopeeListingVariant | None:
     variants = sorted(list(listing.variants or []), key=lambda row: (row.sort_order, row.id))
     for row in variants:
-        if int(row.stock or 0) > 0:
+        if _variant_sellable_cap(row) > 0:
             return row
     return None
 
@@ -72,13 +76,34 @@ def _listing_available_stock(listing: ShopeeListing) -> int:
     return max(0, int(listing.stock_available or 0))
 
 
+def _variant_oversell_remaining(variant: ShopeeListingVariant) -> int:
+    limit_val = max(0, int(variant.oversell_limit or 0))
+    used_val = max(0, int(variant.oversell_used or 0))
+    return max(0, limit_val - used_val)
+
+
+def _variant_sellable_cap(variant: ShopeeListingVariant) -> int:
+    return max(0, int(variant.stock or 0)) + _variant_oversell_remaining(variant)
+
+
+def _listing_sellable_cap(listing: ShopeeListing) -> int:
+    variants = list(listing.variants or [])
+    if variants:
+        return int(sum(_variant_sellable_cap(v) for v in variants))
+    return _listing_available_stock(listing)
+
+
 def _pick_variant_for_buyer(
     listing: ShopeeListing,
     *,
     buyer_purchase_power: float,
     rng: random.Random,
 ) -> ShopeeListingVariant | None:
-    variants = [row for row in sorted(list(listing.variants or []), key=lambda x: (x.sort_order, x.id)) if int(row.stock or 0) > 0]
+    variants = [
+        row
+        for row in sorted(list(listing.variants or []), key=lambda x: (x.sort_order, x.id))
+        if _variant_sellable_cap(row) > 0
+    ]
     if not variants:
         return None
     if len(variants) == 1:
@@ -91,7 +116,7 @@ def _pick_variant_for_buyer(
         price = max(1, int(row.price or 0))
         price_gap = abs(price - target_price) / max(target_price, 1)
         price_score = _clamp(1 - price_gap, 0.0, 1.0)
-        stock_score = _clamp(float(row.stock or 0) / 30.0, 0.0, 1.0)
+        stock_score = _clamp(float(_variant_sellable_cap(row)) / 30.0, 0.0, 1.0)
         jitter = rng.random() * 0.06
         score = 0.70 * price_score + 0.24 * stock_score + 0.06 * jitter
         if score > best_score:
@@ -175,8 +200,8 @@ def simulate_orders_for_run(
             "buyer_journeys": buyer_journeys,
         }
 
-    products_in_stock = [row for row in live_products if _listing_available_stock(row) > 0]
-    if not products_in_stock:
+    sellable_products = [row for row in live_products if _listing_sellable_cap(row) > 0]
+    if not sellable_products:
         skip_reasons["no_stock"] = 1
         debug_payload = {"buyer_journeys": buyer_journeys}
         row = ShopeeOrderGenerationLog(
@@ -214,7 +239,7 @@ def simulate_orders_for_run(
             user_id=user_id,
             tick_time=now,
             active_buyer_count=0,
-            candidate_product_count=len(products_in_stock),
+            candidate_product_count=len(sellable_products),
             generated_order_count=0,
             skip_reasons_json=json.dumps(skip_reasons, ensure_ascii=False),
             debug_payload_json=json.dumps(debug_payload, ensure_ascii=False),
@@ -224,7 +249,7 @@ def simulate_orders_for_run(
         return {
             "tick_time": now,
             "active_buyer_count": 0,
-            "candidate_product_count": len(products_in_stock),
+            "candidate_product_count": len(sellable_products),
             "generated_order_count": 0,
             "skip_reasons": skip_reasons,
             "buyer_journeys": buyer_journeys,
@@ -264,9 +289,9 @@ def simulate_orders_for_run(
 
         preferred_categories = _safe_load_str_list(buyer.preferred_categories_json)
         preferred_candidates = [
-            row for row in products_in_stock if _category_match_score(row.category, preferred_categories) > 0
+            row for row in sellable_products if _category_match_score(row.category, preferred_categories) > 0
         ]
-        candidates = preferred_candidates if preferred_candidates else products_in_stock
+        candidates = preferred_candidates if preferred_candidates else sellable_products
         if not candidates:
             skip_reasons["no_candidate"] = skip_reasons.get("no_candidate", 0) + 1
             journey["decision"] = "skipped_no_candidate"
@@ -284,7 +309,7 @@ def simulate_orders_for_run(
             price_gap = abs(price - target_price) / max(target_price, 1)
             price_score = _clamp(1 - price_gap, 0.0, 1.0)
             quality_score = 1.0 if (listing.quality_status or "").strip() == "内容合格" else 0.45
-            stock_score = _clamp(float(_listing_available_stock(listing)) / 40.0, 0.0, 1.0)
+            stock_score = _clamp(float(_listing_sellable_cap(listing)) / 40.0, 0.0, 1.0)
             base_intent = _clamp(float(buyer.base_buy_intent or 0.0), 0.0, 1.0)
             impulse = _clamp(float(buyer.impulse_level or 0.0), 0.0, 1.0)
             score = (
@@ -304,6 +329,7 @@ def simulate_orders_for_run(
                     "parent_sku": listing.parent_sku,
                     "price": int(listing.price or 0),
                     "stock_available": _listing_available_stock(listing),
+                    "sellable_cap": _listing_sellable_cap(listing),
                     "score_components": {
                         "category_match": round(category_match, 4),
                         "price_score": round(price_score, 4),
@@ -351,22 +377,30 @@ def simulate_orders_for_run(
             buyer_purchase_power=float(buyer.purchase_power or 0.5),
             rng=rng,
         )
-        available_stock = _listing_available_stock(best_listing)
+        variant_available_stock = _listing_available_stock(best_listing)
+        variant_oversell_remaining = 0
+        sellable_cap = _listing_sellable_cap(best_listing)
         if variant:
-            available_stock = max(0, int(variant.stock or 0))
-        if available_stock <= 0:
+            variant_available_stock = max(0, int(variant.stock or 0))
+            variant_oversell_remaining = _variant_oversell_remaining(variant)
+            sellable_cap = _variant_sellable_cap(variant)
+        if sellable_cap <= 0:
             skip_reasons["no_stock"] = skip_reasons.get("no_stock", 0) + 1
             journey["decision"] = "skipped_no_stock"
-            journey["reason"] = "available_stock_le_0_or_variant_stock_empty"
+            journey["reason"] = "sellable_cap_le_0"
             buyer_journeys.append(journey)
             continue
 
         min_qty = max(1, int(best_listing.min_purchase_qty or 1))
-        max_qty = min(3, available_stock)
+        max_qty = min(3, sellable_cap)
         if best_listing.max_purchase_qty and int(best_listing.max_purchase_qty) > 0:
             max_qty = min(max_qty, int(best_listing.max_purchase_qty))
         if max_qty < min_qty:
-            quantity = min_qty if available_stock >= min_qty else 1
+            skip_reasons["below_min_purchase_qty"] = skip_reasons.get("below_min_purchase_qty", 0) + 1
+            journey["decision"] = "skipped_min_qty"
+            journey["reason"] = "sellable_cap_lt_min_purchase_qty"
+            buyer_journeys.append(journey)
+            continue
         else:
             quantity = rng.randint(min_qty, max_qty)
         if quantity <= 0:
@@ -379,17 +413,55 @@ def simulate_orders_for_run(
         unit_price = int((variant.price if variant else best_listing.price) or 0)
         unit_price = max(unit_price, 1)
         payment = unit_price * quantity
-        best_listing.stock_available = max(0, int(best_listing.stock_available or 0) - quantity)
+        shortfall_qty = max(0, quantity - variant_available_stock)
+        if shortfall_qty > 0 and variant and shortfall_qty > variant_oversell_remaining:
+            skip_reasons["oversell_limit_reached"] = skip_reasons.get("oversell_limit_reached", 0) + 1
+            journey["decision"] = "skipped_oversell_limit_reached"
+            journey["reason"] = "shortfall_gt_oversell_remaining"
+            buyer_journeys.append(journey)
+            continue
+
+        stock_consumed_planned = quantity - shortfall_qty
+        reserved_qty = 0
+        if int(best_listing.product_id or 0) > 0 and stock_consumed_planned > 0:
+            reserved_qty = reserve_inventory_lots(
+                db,
+                run_id=run_id,
+                product_id=int(best_listing.product_id),
+                qty=stock_consumed_planned,
+            )
+        stock_consumed = reserved_qty
+        if stock_consumed_planned > reserved_qty:
+            shortfall_qty += stock_consumed_planned - reserved_qty
+        if shortfall_qty > 0 and variant and shortfall_qty > variant_oversell_remaining:
+            # 兜底：当库存批次与商品库存展示不同步时，避免透支超卖上限。
+            if int(best_listing.product_id or 0) > 0 and reserved_qty > 0:
+                release_reserved_inventory_lots(
+                    db,
+                    run_id=run_id,
+                    product_id=int(best_listing.product_id),
+                    qty=reserved_qty,
+                )
+            skip_reasons["oversell_limit_reached"] = skip_reasons.get("oversell_limit_reached", 0) + 1
+            journey["decision"] = "skipped_oversell_limit_reached"
+            journey["reason"] = "shortfall_gt_oversell_remaining_after_reserve"
+            buyer_journeys.append(journey)
+            continue
         best_listing.sales_count = int(best_listing.sales_count or 0) + quantity
+        best_listing.stock_available = max(0, int(best_listing.stock_available or 0) - stock_consumed)
         if variant:
-            variant.stock = max(0, int(variant.stock or 0) - quantity)
+            variant.stock = max(0, int(variant.stock or 0) - stock_consumed)
             variant.sales_count = int(variant.sales_count or 0) + quantity
+            if shortfall_qty > 0:
+                variant.oversell_used = int(variant.oversell_used or 0) + shortfall_qty
             # Keep parent stock synchronized with variant total for variant listings.
             best_listing.stock_available = _listing_available_stock(best_listing)
 
         order = ShopeeOrder(
             run_id=run_id,
             user_id=user_id,
+            listing_id=best_listing.id,
+            variant_id=variant.id if variant else None,
             order_no=f"SIM{now.strftime('%Y%m%d%H')}{uuid4().hex[:10].upper()}",
             buyer_name=buyer.nickname,
             buyer_payment=payment,
@@ -403,6 +475,9 @@ def simulate_orders_for_run(
             action_text="查看详情",
             ship_by_date=now + timedelta(days=1),
             ship_by_at=now + timedelta(days=1),
+            stock_fulfillment_status="backorder" if shortfall_qty > 0 else "in_stock",
+            backorder_qty=shortfall_qty,
+            must_restock_before_at=(now + timedelta(hours=BACKORDER_GRACE_GAME_HOURS)) if shortfall_qty > 0 else None,
         )
         db.add(order)
         db.flush()
@@ -414,6 +489,23 @@ def simulate_orders_for_run(
                 quantity=quantity,
                 unit_price=unit_price,
                 image_url=(variant.image_url if variant and (variant.image_url or "").strip() else best_listing.cover_url),
+            )
+        )
+        db.add(
+            InventoryStockMovement(
+                run_id=run_id,
+                user_id=user_id,
+                product_id=int(best_listing.product_id) if best_listing.product_id is not None else None,
+                listing_id=int(best_listing.id),
+                variant_id=int(variant.id) if variant else None,
+                inventory_lot_id=None,
+                biz_order_id=int(order.id),
+                movement_type="order_reserve",
+                qty_delta_on_hand=-int(stock_consumed),
+                qty_delta_reserved=int(reserved_qty),
+                qty_delta_backorder=int(shortfall_qty),
+                biz_ref=order.order_no,
+                remark="Shopee订单模拟占用库存/形成待补货",
             )
         )
         generated_order_count += 1
@@ -429,6 +521,8 @@ def simulate_orders_for_run(
             "quantity": quantity,
             "unit_price": unit_price,
             "buyer_payment": payment,
+            "stock_fulfillment_status": "backorder" if shortfall_qty > 0 else "in_stock",
+            "backorder_qty": shortfall_qty,
         }
         buyer_journeys.append(journey)
 
@@ -438,7 +532,7 @@ def simulate_orders_for_run(
             "hour": hour,
             "weekday_idx": weekday_idx,
             "buyers_total": len(buyers),
-            "products_total": len(products_in_stock),
+            "products_total": len(sellable_products),
         },
     }
     log_row = ShopeeOrderGenerationLog(
@@ -446,7 +540,7 @@ def simulate_orders_for_run(
         user_id=user_id,
         tick_time=now,
         active_buyer_count=active_buyer_count,
-        candidate_product_count=len(products_in_stock),
+        candidate_product_count=len(sellable_products),
         generated_order_count=generated_order_count,
         skip_reasons_json=json.dumps(skip_reasons, ensure_ascii=False),
         debug_payload_json=json.dumps(debug_payload, ensure_ascii=False),
@@ -457,7 +551,7 @@ def simulate_orders_for_run(
     return {
         "tick_time": now,
         "active_buyer_count": active_buyer_count,
-        "candidate_product_count": len(products_in_stock),
+        "candidate_product_count": len(sellable_products),
         "generated_order_count": generated_order_count,
         "skip_reasons": skip_reasons,
         "buyer_journeys": buyer_journeys,

@@ -1,4 +1,4 @@
-import { Calendar, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Eye, HelpCircle, Image as ImageIcon, ImagePlus, Search, Trash2, Video, X } from 'lucide-react';
+import { Calendar, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Eye, HelpCircle, ImagePlus, Search, Trash2, Video, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type WheelEvent } from 'react';
 import DateOnlyPicker from '../components/DateOnlyPicker';
 
@@ -63,6 +63,7 @@ interface ListingEditWholesaleTier {
 
 interface ListingEditDetail {
   id: number;
+  product_id: number | null;
   title: string;
   category_id: number | null;
   category: string | null;
@@ -100,6 +101,22 @@ interface ListingEditDetail {
 interface EditBootstrapResponse {
   draft: DraftDetail;
   listing: ListingEditDetail;
+}
+
+interface WarehouseLinkProductRow {
+  product_id: number;
+  product_name: string;
+  available_qty: number;
+  reserved_qty: number;
+  backorder_qty: number;
+  inbound_lot_count: number;
+}
+
+interface WarehouseLinkProductsResponse {
+  page: number;
+  page_size: number;
+  total: number;
+  rows: WarehouseLinkProductRow[];
 }
 
 interface SpecTemplateField {
@@ -774,6 +791,13 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
   const [previewUrls34, setPreviewUrls34] = useState<string[]>([]);
   const [draft, setDraft] = useState<DraftDetail | null>(null);
   const [sourceListingId, setSourceListingId] = useState<number | null>(null);
+  const [sourceProductId, setSourceProductId] = useState<number | null>(null);
+  const [warehouseKeyword, setWarehouseKeyword] = useState('');
+  const [warehouseRows, setWarehouseRows] = useState<WarehouseLinkProductRow[]>([]);
+  const [warehousePage, setWarehousePage] = useState(1);
+  const [warehouseTotal, setWarehouseTotal] = useState(0);
+  const [warehouseLoading, setWarehouseLoading] = useState(false);
+  const [warehouseError, setWarehouseError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [uploadingAssets, setUploadingAssets] = useState(false);
@@ -843,6 +867,7 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
 
   const hydrateEditListing = (listing: ListingEditDetail) => {
     setSourceListingId(listing.id);
+    setSourceProductId(listing.product_id ?? null);
     setPrice(String(Math.max(Number(listing.price || 0), 0)));
     setStock(String(Math.max(Number(listing.stock_available || 0), 0)));
     setMinPurchaseQty(String(Math.max(Number(listing.min_purchase_qty || 1), 1)));
@@ -984,6 +1009,11 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
   };
 
   const canGoNext = title.trim().length >= 2 && imageFiles11.length > 0 && !submitting;
+  const selectedWarehouseProduct = useMemo(
+    () => warehouseRows.find((row) => row.product_id === sourceProductId) ?? null,
+    [warehouseRows, sourceProductId],
+  );
+  const warehouseTotalPages = Math.max(1, Math.ceil(warehouseTotal / 20));
   const categoryTree = categoryTreeData;
 
   useEffect(() => {
@@ -1149,6 +1179,45 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
       .finally(() => setSubmitting(false));
   }, [editingListingId, runId, step]);
 
+  useEffect(() => {
+    if (!runId) return;
+    const token = localStorage.getItem(ACCESS_TOKEN_KEY);
+    if (!token) return;
+    const controller = new AbortController();
+    const search = new URLSearchParams();
+    search.set('page', String(warehousePage));
+    search.set('page_size', '20');
+    const kw = warehouseKeyword.trim();
+    if (kw) search.set('keyword', kw);
+
+    setWarehouseLoading(true);
+    setWarehouseError('');
+    fetch(`${API_BASE_URL}/shopee/runs/${runId}/warehouse-link-products?${search.toString()}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const data = await res.json().catch(() => null);
+          throw new Error(data?.detail || '加载仓库商品失败');
+        }
+        return res.json() as Promise<WarehouseLinkProductsResponse>;
+      })
+      .then((payload) => {
+        setWarehouseRows(payload.rows || []);
+        setWarehouseTotal(Math.max(0, Number(payload.total || 0)));
+      })
+      .catch((e) => {
+        if ((e as Error)?.name === 'AbortError') return;
+        setWarehouseRows([]);
+        setWarehouseTotal(0);
+        setWarehouseError(e instanceof Error ? e.message : '加载仓库商品失败');
+      })
+      .finally(() => setWarehouseLoading(false));
+
+    return () => controller.abort();
+  }, [runId, warehouseKeyword, warehousePage]);
+
   const onPickImages = (files: FileList | null, ratio: '1:1' | '3:4') => {
     if (!files || files.length === 0) return;
     const selected = Array.from(files).filter((file) =>
@@ -1287,6 +1356,9 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
       await saveDraftFields();
       const token = localStorage.getItem(ACCESS_TOKEN_KEY);
       if (!token) throw new Error('登录态已失效，请重新登录');
+      if (statusValue === 'live' && (!sourceProductId || sourceProductId <= 0)) {
+        throw new Error('请先在右侧关联仓库商品后再发布');
+      }
 
       const formData = new FormData();
       formData.append('status_value', statusValue);
@@ -1369,6 +1441,9 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
       }
       if (parentSku.trim()) {
         formData.append('parent_sku', parentSku.trim());
+      }
+      if (sourceProductId && sourceProductId > 0) {
+        formData.append('source_product_id', String(sourceProductId));
       }
       if (sourceListingId) {
         formData.append('source_listing_id', String(sourceListingId));
@@ -3274,7 +3349,7 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
           <div className="rounded-sm border border-gray-200 bg-white p-6">
             <h2 className="text-[20px] font-semibold leading-none text-[#222]">{isEditingMode ? '产品详情' : '添加新商品'}</h2>
             <p className="mt-3 text-[16px] text-[#777]">
-              输入商品名称或图片后，Shopee 将智能匹配最合适的 Shopee 标准商品，并自动为你填充上架信息
+              发布前请在右侧选择仓库商品完成库存关联，系统将据此计算订单占用与发货出库
             </p>
             <div className="mt-5 border-b border-gray-200" />
 
@@ -3443,7 +3518,7 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
                   value={gtin}
                   onChange={(e) => setGtin(e.target.value)}
                   className="h-10 flex-1 rounded-r-sm border border-[#d9d9d9] px-3 text-[14px] text-[#555] outline-none focus:border-[#ee4d2d]"
-                  placeholder="输入通用商品编码（如 UPC/EAN）以匹配标准商品"
+                  placeholder="输入通用商品编码（如 UPC/EAN）"
                 />
               </div>
             </div>
@@ -3476,25 +3551,89 @@ export default function NewProductView({ runId, editingListingId, onBackToProduc
           <div className="overflow-hidden rounded-sm border border-[#f1dfdc] bg-white">
             <div className="flex h-14 items-center gap-2 border-b border-[#f1dfdc] bg-[#fff6f4] px-4 text-[16px] font-semibold text-[#333]">
               <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-[#ee4d2d] text-[12px] text-white">
-                📣
+                🔗
               </span>
-              Shopee 标准商品
+              仓库关联商品
               <HelpCircle size={14} className="text-[#9f9f9f]" />
             </div>
             <div className="p-4">
-              <div className="flex h-10 items-center justify-between rounded border border-[#ee4d2d] bg-white px-3">
-                <span className="text-[14px] text-[#b5b5b5]">可通过关键词或图片搜索</span>
-                <div className="flex items-center gap-3 text-[#ee4d2d]">
-                  <ImageIcon size={15} />
-                  <Search size={15} />
+              <div className="flex h-10 items-center rounded border border-[#ee4d2d] bg-white px-3">
+                <Search size={15} className="text-[#ee4d2d]" />
+                <input
+                  value={warehouseKeyword}
+                  onChange={(e) => {
+                    setWarehouseKeyword(e.target.value);
+                    setWarehousePage(1);
+                  }}
+                  placeholder="按商品名或ID搜索"
+                  className="ml-2 h-full w-full border-0 text-[14px] text-[#555] outline-none placeholder:text-[#b5b5b5]"
+                />
+              </div>
+
+              <div className="mt-3 rounded border border-[#f3e4e1] bg-[#fffaf9] px-3 py-2 text-[13px] text-[#8f5f54]">
+                关联后将写入商品 `product_id`，后续订单占用/发货会按该仓库商品扣减库存
+              </div>
+
+              <div className="mt-3 max-h-[360px] space-y-2 overflow-y-auto pr-1">
+                {warehouseLoading && <div className="py-4 text-center text-[13px] text-[#999]">加载中...</div>}
+                {!warehouseLoading && warehouseError && <div className="py-4 text-center text-[13px] text-[#ee4d2d]">{warehouseError}</div>}
+                {!warehouseLoading && !warehouseError && warehouseRows.length === 0 && (
+                  <div className="py-6 text-center text-[13px] text-[#999]">暂无可关联仓库商品，请先完成 Step04 入仓</div>
+                )}
+                {!warehouseLoading && !warehouseError && warehouseRows.map((row) => {
+                  const selected = sourceProductId === row.product_id;
+                  return (
+                    <button
+                      key={row.product_id}
+                      type="button"
+                      onClick={() => setSourceProductId(row.product_id)}
+                      className={`w-full rounded border px-3 py-2 text-left transition ${
+                        selected ? 'border-[#ee4d2d] bg-[#fff3ef]' : 'border-[#eee] hover:border-[#f2c1b6]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="truncate text-[14px] font-medium text-[#333]">{row.product_name}</div>
+                        <div className={`text-[12px] ${selected ? 'text-[#ee4d2d]' : 'text-[#999]'}`}>ID {row.product_id}</div>
+                      </div>
+                      <div className="mt-1 text-[12px] text-[#666]">
+                        可用 {row.available_qty} · 已占用 {row.reserved_qty} · 待补货 {row.backorder_qty}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="mt-3 flex items-center justify-between text-[12px] text-[#999]">
+                <span>共 {warehouseTotal} 条</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={warehousePage <= 1}
+                    onClick={() => setWarehousePage((p) => Math.max(1, p - 1))}
+                    className={`rounded border px-2 py-0.5 ${
+                      warehousePage <= 1 ? 'cursor-not-allowed border-[#eee] text-[#ccc]' : 'border-[#ddd] text-[#666] hover:bg-[#fafafa]'
+                    }`}
+                  >
+                    上一页
+                  </button>
+                  <span>{warehousePage}/{warehouseTotalPages}</span>
+                  <button
+                    type="button"
+                    disabled={warehousePage >= warehouseTotalPages}
+                    onClick={() => setWarehousePage((p) => Math.min(warehouseTotalPages, p + 1))}
+                    className={`rounded border px-2 py-0.5 ${
+                      warehousePage >= warehouseTotalPages ? 'cursor-not-allowed border-[#eee] text-[#ccc]' : 'border-[#ddd] text-[#666] hover:bg-[#fafafa]'
+                    }`}
+                  >
+                    下一页
+                  </button>
                 </div>
               </div>
-              <p className="mt-4 text-[14px] leading-5 text-[#666]">
-                Shopee 标准商品提供平台整理的标准化信息。关联后可获得以下收益：
-              </p>
-              <div className="mt-3 space-y-2 text-[14px] text-[#ee4d2d]">
-                <div>• 自动填充商品信息</div>
-                <div>• 冷启动更快，提升上架效率</div>
+
+              <div className="mt-3 rounded border border-dashed border-[#f0c3b7] bg-[#fff7f4] px-3 py-2 text-[12px] text-[#9a6b61]">
+                {sourceProductId
+                  ? `已关联商品 ID ${sourceProductId}${selectedWarehouseProduct ? ` · ${selectedWarehouseProduct.product_name}` : ''}`
+                  : '未关联仓库商品：发布 live 商品前请先关联'}
               </div>
             </div>
           </div>

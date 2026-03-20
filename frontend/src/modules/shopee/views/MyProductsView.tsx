@@ -30,6 +30,8 @@ interface ProductVariantRow {
   price: number;
   stock: number;
   sales_count: number;
+  oversell_limit: number;
+  oversell_used: number;
   sku: string | null;
   image_url: string | null;
 }
@@ -405,9 +407,14 @@ export default function MyProductsView({ runId, onGotoNewProduct }: MyProductsVi
                           <div>
                             <div className="text-gray-700">{formatPrice(variant.price)}</div>
                           </div>
-                          <div className="text-gray-700">{variant.stock}</div>
+                          <div>
+                            <div className="text-gray-700">{variant.stock}</div>
+                            <div className="text-[12px] text-gray-400">可发现货</div>
+                          </div>
                           <div className="text-gray-500">-</div>
-                          <div />
+                          <div className="text-[12px] text-gray-500">
+                            超卖：{variant.oversell_used ?? 0}/{variant.oversell_limit ?? 0}
+                          </div>
                           <div />
                         </div>
                       ))}

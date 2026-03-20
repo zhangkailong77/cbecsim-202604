@@ -1,5 +1,5 @@
 import { CalendarClock, ChevronRight, CircleCheckBig, Clock3, ShieldCheck, Truck } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import logoImg from '../../assets/home/logo.png';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000';
@@ -148,6 +148,7 @@ export default function LogisticsClearancePage({ run, currentUser, onBackToSetup
   const [remainingCashLocal, setRemainingCashLocal] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [nowMs, setNowMs] = useState(Date.now());
+  const [acceleratingShipmentId, setAcceleratingShipmentId] = useState<number | null>(null);
 
   const playerDisplayName = currentUser?.full_name?.trim() || currentUser?.username || '玩家';
 
@@ -262,6 +263,10 @@ export default function LogisticsClearancePage({ run, currentUser, onBackToSetup
     () => shipments.map((shipment) => ({ shipment, runtime: calcShipmentRuntime(shipment, nowMs) })),
     [shipments, nowMs],
   );
+  const latestPendingShipment = useMemo(
+    () => shipmentRuntimes.find((item) => item.runtime.status !== 'customs_cleared') ?? null,
+    [shipmentRuntimes],
+  );
   const canEnterShopee = shipmentRuntimes.some((item) => item.runtime.status === 'customs_cleared');
 
   const toggleOrder = (id: number) => {
@@ -306,6 +311,39 @@ export default function LogisticsClearancePage({ run, currentUser, onBackToSetup
       setSelectedOrderIds([]);
     } catch {
       setError('发运失败，请检查网络后重试。');
+    }
+  };
+
+  const handleDebugAccelerateClearance = async () => {
+    if (!run?.id || !latestPendingShipment) {
+      setError('当前没有可加速的物流单。');
+      return;
+    }
+    const token = localStorage.getItem(ACCESS_TOKEN_KEY);
+    if (!token) {
+      setError('登录状态失效，请重新登录。');
+      return;
+    }
+    setError('');
+    setAcceleratingShipmentId(latestPendingShipment.shipment.id);
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/game/runs/${run.id}/logistics/shipments/${latestPendingShipment.shipment.id}/debug/accelerate-clearance`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        setError(data.detail || '加速失败，请稍后重试。');
+        return;
+      }
+      await loadData();
+    } catch {
+      setError('加速失败，请检查网络后重试。');
+    } finally {
+      setAcceleratingShipmentId(null);
     }
   };
 
@@ -507,6 +545,17 @@ export default function LogisticsClearancePage({ run, currentUser, onBackToSetup
                     </div>
                   ))}
                 </div>
+                <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-2.5">
+                  <button
+                    type="button"
+                    onClick={handleDebugAccelerateClearance}
+                    disabled={!latestPendingShipment || acceleratingShipmentId !== null}
+                    className="h-9 w-full rounded-lg bg-amber-500 text-[13px] font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                    title={latestPendingShipment ? `加速物流单 #${latestPendingShipment.shipment.id.toString().slice(-6)} 到清关完成` : '当前无可加速物流单'}
+                  >
+                    {acceleratingShipmentId !== null ? '加速中...' : '调试：加速到清关完成'}
+                  </button>
+                </div>
               </section>
 
               <section className="rounded-2xl border border-[#dbeafe] bg-[#f4f8ff] p-4">
@@ -535,7 +584,7 @@ function KV({
 }: {
   label: string;
   value: string;
-  icon?: JSX.Element;
+  icon?: ReactNode;
   strong?: boolean;
   danger?: boolean;
   success?: boolean;
