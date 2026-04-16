@@ -1469,6 +1469,113 @@ def _create_live_listing_for_run(monkeypatch, token: str, run_id: int, *, stock:
     return int(publish_live.json()["listing_id"])
 
 
+def _insert_live_listing_for_run(run_id: int, *, stock: int, price: int = 129) -> int:
+    from app.db import SessionLocal
+    from app.models import GameRun, ShopeeListing
+
+    with SessionLocal() as db:
+        run_row = db.query(GameRun).filter(GameRun.id == run_id).first()
+        assert run_row is not None
+        listing = ShopeeListing(
+            run_id=run_row.id,
+            user_id=run_row.user_id,
+            title="套餐优惠测试商品",
+            category_id=1,
+            category="美妆个护",
+            status="live",
+            quality_status="qualified",
+            stock_available=stock,
+            sales_count=0,
+            price=price,
+            original_price=price,
+            cover_url="https://oss.example.com/bundle-cover.jpg",
+            sku_code=f"BUNDLE-{run_id}-{stock}",
+        )
+        db.add(listing)
+        db.commit()
+        db.refresh(listing)
+        return int(listing.id)
+
+
+def test_shopee_bundle_create_bootstrap_returns_defaults(monkeypatch):
+    token = _register_or_login_player("13800138231")
+    run = _create_running_run(token, duration_days=30)
+    _insert_live_listing_for_run(run["id"], stock=25, price=109)
+
+    resp = client.get(
+        f"/shopee/runs/{run['id']}/marketing/bundle/create/bootstrap",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"campaign_type": "bundle"},
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["meta"]["campaign_type"] == "bundle"
+    assert payload["form"]["name_max_length"] == 25
+    assert payload["form"]["bundle_type"] == "percent"
+    assert payload["rules"]["purchase_limit_range"] == [1, 999]
+    assert len(payload["form"]["tiers"]) == 1
+    assert payload["product_picker"]["default_page_size"] == 20
+
+
+def test_shopee_bundle_campaign_create_and_list(monkeypatch):
+    token = _register_or_login_player("13800138232")
+    run = _create_running_run(token, duration_days=30)
+    listing_id = _insert_live_listing_for_run(run["id"], stock=40, price=159)
+
+    eligible_resp = client.get(
+        f"/shopee/runs/{run['id']}/marketing/bundle/eligible-products",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"page": 1, "page_size": 20},
+    )
+    assert eligible_resp.status_code == 200
+    eligible_payload = eligible_resp.json()
+    selected_item = next((item for item in eligible_payload["items"] if int(item["listing_id"]) == listing_id), None)
+    assert selected_item is not None
+
+    create_resp = client.post(
+        f"/shopee/runs/{run['id']}/marketing/bundle/campaigns",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "campaign_type": "bundle",
+            "campaign_name": "护肤套装满件折扣",
+            "start_at": "2026-04-15T11:00",
+            "end_at": "2026-04-20T11:00",
+            "bundle_type": "percent",
+            "purchase_limit": 3,
+            "tiers": [
+                {"tier_no": 1, "buy_quantity": 2, "discount_value": 10},
+                {"tier_no": 2, "buy_quantity": 3, "discount_value": 15},
+            ],
+            "items": [
+                {
+                    "listing_id": selected_item["listing_id"],
+                    "variant_id": selected_item["variant_id"],
+                    "product_name": selected_item["product_name"],
+                    "variant_name": selected_item["variant_name"],
+                    "image_url": selected_item["image_url"],
+                    "sku": selected_item["sku"],
+                    "original_price": selected_item["original_price"],
+                    "stock_available": selected_item["stock_available"],
+                }
+            ],
+        },
+    )
+    assert create_resp.status_code == 201
+    create_payload = create_resp.json()
+    assert create_payload["campaign_name"] == "护肤套装满件折扣"
+    assert create_payload["campaign_status"] in {"upcoming", "ongoing"}
+    assert create_payload["item_count"] == 1
+
+    list_resp = client.get(
+        f"/shopee/runs/{run['id']}/marketing/discount/bootstrap",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"discount_type": "bundle", "page": 1, "page_size": 10},
+    )
+    assert list_resp.status_code == 200
+    list_payload = list_resp.json()
+    assert any(item["campaign_type"] == "bundle" for item in list_payload["list"]["items"])
+
+
 def test_admin_simulate_orders_generates_orders_and_visible_to_player(monkeypatch):
     player_token = _register_or_login_player("13800138211")
     run = _create_running_run(player_token, duration_days=7)

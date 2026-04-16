@@ -4,7 +4,7 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 
-type ShopeeView = 'dashboard' | 'my-orders' | 'my-products' | 'new-product' | 'my-income' | 'my-balance' | 'bank-accounts';
+type ShopeeView = 'dashboard' | 'my-orders' | 'my-products' | 'new-product' | 'my-income' | 'my-balance' | 'bank-accounts' | 'marketing-centre' | 'marketing-discount' | 'marketing-discount-create';
 
 const menuItems = [
   {
@@ -17,7 +17,7 @@ const menuItems = [
   },
   {
     title: '营销中心',
-    children: ['营销中心', 'Shopee上最便宜', 'Shopee广告', '联盟营销', '直播和视频', '折扣', '我的店铺限时抢购', '代金券', '活动', '国际平台']
+    children: ['营销中心', 'Shopee最划算', 'Shopee广告', '联盟营销', '直播与视频', '折扣', '我的店铺限时抢购', '代金券', '活动', '国际平台']
   },
   {
     title: '客户服务',
@@ -98,6 +98,12 @@ export default function Sidebar({ activeView, onSelectView }: SidebarProps) {
                       if (child === '银行账户') {
                         onSelectView('bank-accounts');
                       }
+                      if (child === '营销中心') {
+                        onSelectView('marketing-centre');
+                      }
+                      if (child === '折扣') {
+                        onSelectView('marketing-discount');
+                      }
                     }}
                     className={`w-full text-left pl-10 pr-6 py-2 text-[14px] transition-colors font-normal ${
                       ((child === '我的订单' && activeView === 'my-orders') ||
@@ -105,7 +111,9 @@ export default function Sidebar({ activeView, onSelectView }: SidebarProps) {
                         (child === '添加新产品' && activeView === 'new-product') ||
                         (child === '我的收入' && activeView === 'my-income') ||
                         (child === '我的余额' && activeView === 'my-balance') ||
-                        (child === '银行账户' && activeView === 'bank-accounts'))
+                        (child === '银行账户' && activeView === 'bank-accounts') ||
+                        (child === '营销中心' && activeView === 'marketing-centre') ||
+                        (child === '折扣' && (activeView === 'marketing-discount' || activeView === 'marketing-discount-create')))
                         ? 'text-[#ee4d2d] border-l-2 border-[#ee4d2d] bg-[#fff7f5]'
                         : 'text-[#333333] hover:text-[#ee4d2d]'
                     }`}

@@ -70,9 +70,18 @@ def init_database():
         OssStorageConfig,
         School,
         SimBuyerProfile,
+        ShopeeDiscountCampaign,
+        ShopeeDiscountCampaignItem,
+        ShopeeDiscountDraft,
+        ShopeeDiscountDraftItem,
+        ShopeeDiscountPerformanceDaily,
+        ShopeeMarketingAnnouncement,
+        ShopeeMarketingEvent,
+        ShopeeMarketingTool,
         ShopeeCategoryNode,
         ShopeeSpecTemplate,
         ShopeeSpecTemplateOption,
+        ShopeeUserDiscountPreference,
         User,
         WarehouseLandmark,
     )
@@ -92,6 +101,7 @@ def init_database():
     _ensure_shopee_spec_templates_columns()
     _ensure_sim_buyer_profiles_columns()
     _ensure_shopee_orders_fulfillment_columns()
+    _ensure_shopee_orders_marketing_columns()
     _ensure_shopee_order_generation_log_indexes()
     _cleanup_game_runs_legacy_columns()
     _ensure_table_comments()
@@ -666,6 +676,201 @@ def init_database():
                         **payload,
                     )
                 )
+
+        marketing_tools = [
+            {
+                "tool_key": "discount",
+                "tool_name": "Discount",
+                "tag_type": "boost_sales",
+                "description": "Set discounts on your products to boost sales",
+                "icon_key": "badge-percent",
+                "target_route": "/u/{public_id}/shopee/marketing/discount",
+                "sort_order": 10,
+            },
+            {
+                "tool_key": "flash_sale",
+                "tool_name": "My Shop's Flash Sale",
+                "tag_type": "boost_sales",
+                "description": "Boost product sales by creating limited-time discount offers in your shop",
+                "icon_key": "store",
+                "target_route": "/u/{public_id}/shopee/marketing/flash-sale",
+                "sort_order": 20,
+            },
+            {
+                "tool_key": "vouchers",
+                "tool_name": "Vouchers",
+                "tag_type": "boost_sales",
+                "description": "Increase orders by offering buyers reduced prices at checkout with vouchers",
+                "icon_key": "ticket",
+                "target_route": "/u/{public_id}/shopee/marketing/vouchers",
+                "sort_order": 30,
+            },
+            {
+                "tool_key": "shopee_ads",
+                "tool_name": "Shopee Ads",
+                "tag_type": "increase_traffic",
+                "description": "Increase exposure and drive sales in high traffic areas on Shopee with ads",
+                "icon_key": "badge-dollar-sign",
+                "target_route": "/u/{public_id}/shopee/marketing/shopee-ads",
+                "sort_order": 40,
+            },
+            {
+                "tool_key": "affiliate_marketing",
+                "tool_name": "Affiliate Marketing Solution",
+                "tag_type": "increase_traffic",
+                "description": "Leverage on Shopee's extensive network of affiliate partners to boost your store promotion",
+                "icon_key": "users-round",
+                "target_route": "/u/{public_id}/shopee/marketing/affiliate-marketing",
+                "sort_order": 50,
+            },
+            {
+                "tool_key": "shipping_fee_promotion",
+                "tool_name": "Shipping Fee Promotion",
+                "tag_type": "boost_sales",
+                "description": "Set shipping fee discounts to attract shoppers to make orders",
+                "icon_key": "truck",
+                "target_route": "/u/{public_id}/shopee/marketing/shipping-fee-promotion",
+                "sort_order": 60,
+            },
+            {
+                "tool_key": "live_streaming",
+                "tool_name": "Live Streaming",
+                "tag_type": "improve_engagement",
+                "description": "Connect Live with your audience and answer shopper questions easily",
+                "icon_key": "video",
+                "target_route": "/u/{public_id}/shopee/marketing/live-video",
+                "sort_order": 70,
+            },
+            {
+                "tool_key": "off_platform_ads",
+                "tool_name": "Off-Platform Ads",
+                "tag_type": "increase_traffic",
+                "description": "Advertise your products on Meta and Google platforms including Facebook, Instagram, Google Search and YouTube",
+                "icon_key": "globe",
+                "target_route": "/u/{public_id}/shopee/marketing/off-platform-ads",
+                "sort_order": 80,
+            },
+            {
+                "tool_key": "review_prize",
+                "tool_name": "Review Prize",
+                "tag_type": "improve_engagement",
+                "description": "Attract customers to leave better reviews by rewarding coins",
+                "icon_key": "message-square-heart",
+                "target_route": "/u/{public_id}/shopee/marketing/review-prize",
+                "sort_order": 90,
+            },
+            {
+                "tool_key": "international_platform",
+                "tool_name": "Shopee International Platform",
+                "tag_type": "boost_sales",
+                "description": "Helps you to sell on overseas Shopee platforms without any additional effort",
+                "icon_key": "earth",
+                "target_route": "/u/{public_id}/shopee/marketing/international-platform",
+                "sort_order": 100,
+            },
+            {
+                "tool_key": "seller_coins",
+                "tool_name": "Seller Coins",
+                "tag_type": "improve_engagement",
+                "description": "Top up seller coins as a reward to encourage shoppers to join shop activities",
+                "icon_key": "coins",
+                "target_route": "/u/{public_id}/shopee/marketing/seller-coins",
+                "sort_order": 110,
+            },
+            {
+                "tool_key": "live_streaming_promotion",
+                "tool_name": "Live Streaming Promotion",
+                "tag_type": "increase_traffic",
+                "description": "Nominate your products to be featured in Shopee Livestream",
+                "icon_key": "radio",
+                "target_route": "/u/{public_id}/shopee/marketing/live-streaming-promotion",
+                "sort_order": 120,
+            },
+            {
+                "tool_key": "marketing_solution",
+                "tool_name": "Marketing Solution",
+                "tag_type": "increase_traffic",
+                "description": "Combined marketing tools for optimized engagement and returns with mission rewards from completion",
+                "icon_key": "chart-no-axes-combined",
+                "target_route": "/u/{public_id}/shopee/marketing/marketing-solution",
+                "sort_order": 130,
+            },
+        ]
+        existing_tool_keys = {row.tool_key for row in db.query(ShopeeMarketingTool).all()}
+        for item in marketing_tools:
+            if item["tool_key"] in existing_tool_keys:
+                continue
+            db.add(ShopeeMarketingTool(**item))
+
+        announcement_seed = [
+            {
+                "market": "MY",
+                "lang": "zh-CN",
+                "title": "免费！推广奖励升级",
+                "summary": "新增营销激励包，完成活动门槛后可获得额外曝光位。",
+                "badge_text": "HOT",
+                "priority": 100,
+                "status": "published",
+            },
+            {
+                "market": "MY",
+                "lang": "zh-CN",
+                "title": "季中大促排期开放",
+                "summary": "请尽快完成折扣、券和活动报名，抢占平台营销流量入口。",
+                "badge_text": "SALE",
+                "priority": 90,
+                "status": "published",
+            },
+            {
+                "market": "MY",
+                "lang": "zh-CN",
+                "title": "Google Ads 联动能力上线",
+                "summary": "站外投放数据将逐步纳入营销中心，后续支持效果归因。",
+                "badge_text": "NEW",
+                "priority": 80,
+                "status": "published",
+            },
+        ]
+        existing_announcement_titles = {row.title for row in db.query(ShopeeMarketingAnnouncement).all()}
+        for item in announcement_seed:
+            if item["title"] in existing_announcement_titles:
+                continue
+            db.add(ShopeeMarketingAnnouncement(**item))
+
+        event_seed = [
+            {
+                "market": "MY",
+                "lang": "zh-CN",
+                "title": "Super Voucher Day",
+                "image_url": "marketing-event-super-voucher-day",
+                "jump_url": "/u/{public_id}/shopee/marketing/campaign",
+                "status": "ongoing",
+                "sort_order": 10,
+            },
+            {
+                "market": "MY",
+                "lang": "zh-CN",
+                "title": "Mega Campaign Payday",
+                "image_url": "marketing-event-mega-payday",
+                "jump_url": "/u/{public_id}/shopee/marketing/flash-sale",
+                "status": "ongoing",
+                "sort_order": 20,
+            },
+            {
+                "market": "MY",
+                "lang": "zh-CN",
+                "title": "Seller Growth Week",
+                "image_url": "marketing-event-growth-week",
+                "jump_url": "/u/{public_id}/shopee/marketing/shopee-ads",
+                "status": "upcoming",
+                "sort_order": 30,
+            },
+        ]
+        existing_event_titles = {row.title for row in db.query(ShopeeMarketingEvent).all()}
+        for item in event_seed:
+            if item["title"] in existing_event_titles:
+                continue
+            db.add(ShopeeMarketingEvent(**item))
         db.commit()
 
 
@@ -1063,6 +1268,38 @@ def _ensure_shopee_orders_fulfillment_columns():
                 pass
 
 
+def _ensure_shopee_orders_marketing_columns():
+    inspector = inspect(engine)
+    if "shopee_orders" not in inspector.get_table_names():
+        return
+
+    existing_columns = {col["name"] for col in inspector.get_columns("shopee_orders")}
+    missing_sql = []
+    if "marketing_campaign_type" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN marketing_campaign_type VARCHAR(32) NULL")
+    if "marketing_campaign_id" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN marketing_campaign_id INTEGER NULL")
+    if "marketing_campaign_name_snapshot" not in existing_columns:
+        missing_sql.append("ALTER TABLE shopee_orders ADD COLUMN marketing_campaign_name_snapshot VARCHAR(255) NULL")
+
+    if not missing_sql:
+        return
+
+    with engine.begin() as conn:
+        for sql in missing_sql:
+            conn.execute(text(sql))
+        if "marketing_campaign_type" not in existing_columns:
+            try:
+                conn.execute(text("CREATE INDEX ix_shopee_orders_marketing_campaign_type ON shopee_orders (marketing_campaign_type)"))
+            except Exception:
+                pass
+        if "marketing_campaign_id" not in existing_columns:
+            try:
+                conn.execute(text("CREATE INDEX ix_shopee_orders_marketing_campaign_id ON shopee_orders (marketing_campaign_id)"))
+            except Exception:
+                pass
+
+
 def _ensure_shopee_order_generation_log_indexes():
     if DATABASE_URL.startswith("sqlite"):
         return
@@ -1134,6 +1371,16 @@ def _ensure_table_comments():
         "shopee_finance_ledger_entries": "Shopee 财务流水明细表（回款/支出）",
         "game_run_cash_adjustments": "工作台资金调账记录表（含 Shopee 提现转入）",
         "shopee_bank_accounts": "Shopee 银行账户表（收款账户管理）",
+        "shopee_marketing_announcements": "Shopee 营销中心公告表",
+        "shopee_marketing_tools": "Shopee 营销工具配置表",
+        "shopee_marketing_events": "Shopee 营销活动横幅表",
+        "shopee_user_marketing_preferences": "Shopee 营销中心用户偏好表",
+        "shopee_discount_campaigns": "Shopee 折扣活动主表",
+        "shopee_discount_campaign_items": "Shopee 折扣活动商品明细表",
+        "shopee_discount_drafts": "Shopee 折扣创建页草稿主表",
+        "shopee_discount_draft_items": "Shopee 折扣创建页草稿商品明细表",
+        "shopee_discount_performance_daily": "Shopee 折扣活动日表现快照表",
+        "shopee_user_discount_preferences": "Shopee 折扣页用户筛选偏好表",
         "shopee_order_generation_logs": "Shopee 订单模拟生成日志表",
         "warehouse_landmarks": "海外仓地标点位表",
         "sim_buyer_profiles": "买家画像池表（模拟订单买家）",
@@ -1523,6 +1770,9 @@ def _ensure_column_comments():
             "cancelled_at": "取消时间",
             "cancel_reason": "取消原因",
             "cancel_source": "取消来源",
+            "marketing_campaign_type": "命中的营销活动类型(discount/bundle/add_on)",
+            "marketing_campaign_id": "命中的营销活动ID",
+            "marketing_campaign_name_snapshot": "下单时命中的营销活动名称快照",
             "created_at": "创建时间",
         },
         "shopee_order_items": {
@@ -1596,6 +1846,147 @@ def _ensure_column_comments():
             "currency": "币种（RM）",
             "is_default": "是否默认收款账户",
             "verify_status": "校验状态（verified/pending）",
+            "created_at": "创建时间",
+            "updated_at": "更新时间",
+        },
+        "shopee_marketing_announcements": {
+            "id": "主键ID",
+            "market": "市场",
+            "lang": "语言",
+            "title": "公告标题",
+            "summary": "公告摘要",
+            "badge_text": "徽标文案",
+            "priority": "优先级（越高越靠前）",
+            "start_at": "开始展示时间",
+            "end_at": "结束展示时间",
+            "status": "状态(draft/published/offline)",
+            "created_at": "创建时间",
+            "updated_at": "更新时间",
+        },
+        "shopee_marketing_tools": {
+            "id": "主键ID",
+            "tool_key": "工具唯一键",
+            "tool_name": "工具名称",
+            "tag_type": "能力标签类型(boost_sales/increase_traffic/improve_engagement)",
+            "description": "工具描述",
+            "icon_key": "图标键",
+            "target_route": "目标路由",
+            "sort_order": "排序号",
+            "is_enabled": "是否启用",
+            "is_visible": "是否显示",
+            "created_at": "创建时间",
+            "updated_at": "更新时间",
+        },
+        "shopee_marketing_events": {
+            "id": "主键ID",
+            "market": "市场",
+            "lang": "语言",
+            "title": "活动标题",
+            "image_url": "横幅图片地址或标识",
+            "jump_url": "点击跳转地址",
+            "start_at": "开始时间",
+            "end_at": "结束时间",
+            "status": "状态(upcoming/ongoing/ended/offline)",
+            "sort_order": "排序号",
+            "created_at": "创建时间",
+            "updated_at": "更新时间",
+        },
+        "shopee_user_marketing_preferences": {
+            "id": "主键ID",
+            "run_id": "对局ID",
+            "user_id": "用户ID",
+            "tools_collapsed": "营销工具区是否折叠",
+            "last_viewed_at": "最近查看时间",
+            "created_at": "创建时间",
+            "updated_at": "更新时间",
+        },
+        "shopee_discount_campaigns": {
+            "id": "主键ID",
+            "run_id": "对局ID",
+            "user_id": "用户ID",
+            "campaign_type": "活动类型(discount/bundle/add_on)",
+            "campaign_name": "活动名称",
+            "campaign_status": "活动状态(draft/upcoming/ongoing/ended/disabled)",
+            "start_at": "活动开始时间",
+            "end_at": "活动结束时间",
+            "market": "市场",
+            "currency": "币种",
+            "rules_json": "活动规则JSON",
+            "share_token": "分享标识Token",
+            "source_campaign_id": "来源活动ID(复制场景)",
+            "created_at": "创建时间",
+            "updated_at": "更新时间",
+        },
+        "shopee_discount_campaign_items": {
+            "id": "主键ID",
+            "campaign_id": "折扣活动ID",
+            "listing_id": "Shopee商品ID",
+            "variant_id": "Shopee变体ID",
+            "product_name_snapshot": "活动商品名称快照",
+            "image_url_snapshot": "活动商品图片快照",
+            "sku_snapshot": "活动商品SKU快照",
+            "original_price": "原始售价",
+            "discount_type": "折扣规则类型(percent/fixed_price/bundle/add_on)",
+            "discount_value": "折扣值",
+            "final_price": "活动最终价",
+            "sort_order": "排序号",
+            "created_at": "创建时间",
+            "updated_at": "更新时间",
+        },
+        "shopee_discount_drafts": {
+            "id": "主键ID",
+            "run_id": "对局ID",
+            "user_id": "用户ID",
+            "campaign_type": "活动类型(discount)",
+            "campaign_name": "活动名称",
+            "start_at": "活动开始时间",
+            "end_at": "活动结束时间",
+            "status": "草稿状态(draft)",
+            "source_campaign_id": "来源活动ID(复制场景)",
+            "created_at": "创建时间",
+            "updated_at": "更新时间",
+        },
+        "shopee_discount_draft_items": {
+            "id": "主键ID",
+            "draft_id": "草稿ID",
+            "listing_id": "Shopee商品ID",
+            "variant_id": "Shopee变体ID",
+            "product_name_snapshot": "草稿商品名称快照",
+            "image_url_snapshot": "草稿商品图片快照",
+            "sku_snapshot": "草稿商品SKU快照",
+            "original_price": "原始售价",
+            "discount_mode": "折扣模式(percent/final_price)",
+            "discount_percent": "折扣比例",
+            "final_price": "折后价",
+            "activity_stock_limit": "活动库存上限",
+            "sort_order": "排序号",
+            "created_at": "创建时间",
+            "updated_at": "更新时间",
+        },
+        "shopee_discount_performance_daily": {
+            "id": "主键ID",
+            "run_id": "对局ID",
+            "user_id": "用户ID",
+            "campaign_id": "折扣活动ID",
+            "stat_date": "统计日期",
+            "sales_amount": "销售额",
+            "orders_count": "订单数",
+            "units_sold": "售出件数",
+            "buyers_count": "买家数",
+            "created_at": "创建时间",
+            "updated_at": "更新时间",
+        },
+        "shopee_user_discount_preferences": {
+            "id": "主键ID",
+            "run_id": "对局ID",
+            "user_id": "用户ID",
+            "selected_discount_type": "最近选择的活动类型筛选",
+            "selected_status": "最近选择的状态筛选",
+            "search_field": "最近选择的搜索字段",
+            "keyword": "最近输入的关键字",
+            "date_from": "最近选择的开始时间",
+            "date_to": "最近选择的结束时间",
+            "last_viewed_at": "最近查看时间",
             "created_at": "创建时间",
             "updated_at": "更新时间",
         },

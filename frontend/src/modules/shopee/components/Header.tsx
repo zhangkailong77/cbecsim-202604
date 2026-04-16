@@ -7,8 +7,9 @@ interface HeaderProps {
   runId: number | null;
   onBackToSetup: () => void;
   onBackToDashboard: () => void;
-  onNavigateToView: (view: 'dashboard' | 'my-orders' | 'my-products' | 'new-product' | 'my-income' | 'my-balance' | 'bank-accounts') => void;
-  activeView: 'dashboard' | 'my-orders' | 'my-products' | 'new-product' | 'my-income' | 'my-balance' | 'bank-accounts';
+  onNavigateToView: (view: 'dashboard' | 'my-orders' | 'my-products' | 'new-product' | 'my-income' | 'my-balance' | 'bank-accounts' | 'marketing-centre' | 'marketing-discount' | 'marketing-discount-create') => void;
+  activeView: 'dashboard' | 'my-orders' | 'my-products' | 'new-product' | 'my-income' | 'my-balance' | 'bank-accounts' | 'marketing-centre' | 'marketing-discount' | 'marketing-discount-create';
+  marketingCreateType?: 'discount' | 'bundle' | 'add_on';
   isOrderDetail?: boolean;
   isProductDetail?: boolean;
 }
@@ -20,6 +21,7 @@ export default function Header({
   onBackToDashboard,
   onNavigateToView,
   activeView,
+  marketingCreateType = 'discount',
   isOrderDetail = false,
   isProductDetail = false,
 }: HeaderProps) {
@@ -62,6 +64,50 @@ export default function Header({
           >
             {activeView === 'my-income' ? '我的收入' : activeView === 'my-balance' ? '我的余额' : '银行账户'}
           </button>
+        </div>
+      );
+    }
+    if (activeView === 'marketing-centre') {
+      return (
+        <div className="flex items-center gap-2 text-[14px]">
+          <span className="text-gray-300">{'>'}</span>
+          <button
+            type="button"
+            onClick={() => onNavigateToView('marketing-centre')}
+            className="text-gray-700 hover:text-[#ee4d2d]"
+          >
+            营销中心
+          </button>
+        </div>
+      );
+    }
+    if (activeView === 'marketing-discount' || activeView === 'marketing-discount-create') {
+      return (
+        <div className="flex items-center gap-2 text-[14px]">
+          <span className="text-gray-300">{'>'}</span>
+          <button
+            type="button"
+            onClick={() => onNavigateToView('marketing-centre')}
+            className="text-gray-700 hover:text-[#ee4d2d]"
+          >
+            营销中心
+          </button>
+          <span className="text-gray-300">{'>'}</span>
+          <button
+            type="button"
+            onClick={() => onNavigateToView('marketing-discount')}
+            className="text-gray-700 hover:text-[#ee4d2d]"
+          >
+            折扣
+          </button>
+          {activeView === 'marketing-discount-create' && (
+            <>
+              <span className="text-gray-300">{'>'}</span>
+              <span className="text-gray-700">
+                {marketingCreateType === 'bundle' ? '创建套餐优惠' : marketingCreateType === 'add_on' ? '创建加价购' : '创建单品折扣'}
+              </span>
+            </>
+          )}
         </div>
       );
     }

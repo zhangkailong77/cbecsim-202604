@@ -11,6 +11,10 @@ import NewProductView from './views/NewProductView';
 import MyBalanceView from './views/MyBalanceView';
 import MyIncomeView from './views/MyIncomeView';
 import MyBankAccountsView from './views/MyBankAccountsView';
+import MarketingCentreView from './views/MarketingCentreView';
+import MarketingDiscountView from './views/MarketingDiscountView';
+import DiscountCreateView from './views/DiscountCreateView';
+import BundleCreateView from './views/BundleCreateView';
 
 interface ShopeePageProps {
   run: {
@@ -48,13 +52,36 @@ interface NotificationOrdersResponse {
 
 const HISTORY_READONLY_DETAIL = '历史对局仅支持回溯查看，不能继续经营操作。';
 
+type ShopeeView =
+  | 'dashboard'
+  | 'my-orders'
+  | 'my-products'
+  | 'new-product'
+  | 'my-income'
+  | 'my-balance'
+  | 'bank-accounts'
+  | 'marketing-centre'
+  | 'marketing-discount'
+  | 'marketing-discount-create';
+
+type MarketingCreateType = 'discount' | 'bundle' | 'add_on';
+
+function resolveMarketingCreateType(search: string): MarketingCreateType {
+  const type = new URLSearchParams(search).get('type');
+  if (type === 'bundle' || type === 'add_on') return type;
+  return 'discount';
+}
+
 export default function ShopeePage({ run, currentUser, onBackToSetup, readOnly = false }: ShopeePageProps) {
   const [scale, setScale] = useState(1);
-  const [activeView, setActiveView] = useState<'dashboard' | 'my-orders' | 'my-products' | 'new-product' | 'my-income' | 'my-balance' | 'bank-accounts'>(() => {
+  const [activeView, setActiveView] = useState<ShopeeView>(() => {
     const path = window.location.pathname;
     if (/\/shopee\/order(?:\/\d+)?\/?$/.test(path)) return 'my-orders';
     if (/\/shopee\/product\/add_news\/?$/.test(path)) return 'new-product';
     if (/\/shopee\/product\/list\/(all|live|violation|review|unpublished)\/?$/.test(path)) return 'my-products';
+    if (/\/shopee\/marketing-centre\/?$/.test(path)) return 'marketing-centre';
+    if (/\/shopee\/marketing\/discount\/create\/?$/.test(path)) return 'marketing-discount-create';
+    if (/\/shopee\/marketing\/discount\/?$/.test(path)) return 'marketing-discount';
     if (/\/shopee\/finance\/income\/?$/.test(path)) return 'my-income';
     if (/\/shopee\/finance\/balance\/?$/.test(path)) return 'my-balance';
     if (/\/shopee\/finance\/bank-accounts\/?$/.test(path)) return 'bank-accounts';
@@ -75,6 +102,7 @@ export default function ShopeePage({ run, currentUser, onBackToSetup, readOnly =
     const search = new URLSearchParams(window.location.search);
     return search.get('type') || 'all';
   });
+  const [marketingCreateType, setMarketingCreateType] = useState<MarketingCreateType>(() => resolveMarketingCreateType(window.location.search));
   const [notificationDrawerOpen, setNotificationDrawerOpen] = useState(false);
   const [notificationCount, setNotificationCount] = useState(0);
   const [notificationOrders, setNotificationOrders] = useState<NotificationOrder[]>([]);
@@ -88,6 +116,9 @@ export default function ShopeePage({ run, currentUser, onBackToSetup, readOnly =
     if (/\/shopee\/order(?:\/\d+)?\/?$/.test(path)) return 'my-orders';
     if (/\/shopee\/product\/add_news\/?$/.test(path)) return 'new-product';
     if (/\/shopee\/product\/list\/(all|live|violation|review|unpublished)\/?$/.test(path)) return 'my-products';
+    if (/\/shopee\/marketing-centre\/?$/.test(path)) return 'marketing-centre';
+    if (/\/shopee\/marketing\/discount\/create\/?$/.test(path)) return 'marketing-discount-create';
+    if (/\/shopee\/marketing\/discount\/?$/.test(path)) return 'marketing-discount';
     if (/\/shopee\/finance\/income\/?$/.test(path)) return 'my-income';
     if (/\/shopee\/finance\/balance\/?$/.test(path)) return 'my-balance';
     if (/\/shopee\/finance\/bank-accounts\/?$/.test(path)) return 'bank-accounts';
@@ -103,9 +134,12 @@ export default function ShopeePage({ run, currentUser, onBackToSetup, readOnly =
     return nextQuery ? `${pathname}?${nextQuery}` : pathname;
   };
 
-  const buildShopeePath = (view: 'dashboard' | 'my-orders' | 'my-products' | 'new-product' | 'my-income' | 'my-balance' | 'bank-accounts') => {
+  const buildShopeePath = (view: ShopeeView) => {
     const base = `/u/${encodeURIComponent(currentUser?.public_id ?? '')}/shopee`;
     if (view === 'new-product') return `${base}/product/add_news`;
+    if (view === 'marketing-centre') return `${base}/marketing-centre`;
+    if (view === 'marketing-discount') return `${base}/marketing/discount`;
+    if (view === 'marketing-discount-create') return `${base}/marketing/discount/create?type=discount`;
     if (view === 'my-income') return `${base}/finance/income`;
     if (view === 'my-balance') return `${base}/finance/balance`;
     if (view === 'bank-accounts') return `${base}/finance/bank-accounts`;
@@ -131,6 +165,7 @@ export default function ShopeePage({ run, currentUser, onBackToSetup, readOnly =
       setEditingListingId(parseEditingListingIdFromPath());
       setActiveOrderId(parseOrderIdFromPath());
       setOrderReturnType(new URLSearchParams(window.location.search).get('type') || 'all');
+      setMarketingCreateType(resolveMarketingCreateType(window.location.search));
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
@@ -138,7 +173,7 @@ export default function ShopeePage({ run, currentUser, onBackToSetup, readOnly =
 
   useEffect(() => {
     if (!readOnly) return;
-    const allowed = new Set(['dashboard', 'my-orders', 'my-products', 'new-product', 'my-income', 'my-balance', 'bank-accounts']);
+    const allowed = new Set(['dashboard', 'my-orders', 'my-products', 'new-product', 'my-income', 'my-balance', 'bank-accounts', 'marketing-centre', 'marketing-discount', 'marketing-discount-create']);
     if (!allowed.has(activeView)) {
       setActiveView('my-orders');
       const nextPath = withHistoryRunId(buildShopeePath('my-orders'));
@@ -209,9 +244,9 @@ export default function ShopeePage({ run, currentUser, onBackToSetup, readOnly =
     };
   }, [run?.id, activeView]);
 
-  const handleSelectView = (view: 'dashboard' | 'my-orders' | 'my-products' | 'new-product' | 'my-income' | 'my-balance' | 'bank-accounts', listingId?: number | null) => {
+  const handleSelectView = (view: ShopeeView, listingId?: number | null) => {
     if (readOnly) {
-      const allowed = new Set(['dashboard', 'my-orders', 'my-products', 'new-product', 'my-income', 'my-balance', 'bank-accounts']);
+      const allowed = new Set(['dashboard', 'my-orders', 'my-products', 'new-product', 'my-income', 'my-balance', 'bank-accounts', 'marketing-centre', 'marketing-discount', 'marketing-discount-create']);
       if (!allowed.has(view)) {
         alert(HISTORY_READONLY_DETAIL);
         return;
@@ -240,6 +275,9 @@ export default function ShopeePage({ run, currentUser, onBackToSetup, readOnly =
     setEditingListingId(view === 'new-product' ? (listingId && listingId > 0 ? listingId : null) : null);
     setActiveOrderId(null);
     setActiveView(view);
+    if (view === 'marketing-discount-create') {
+      setMarketingCreateType(resolveMarketingCreateType(nextPathWithRunId.includes('?') ? `?${nextPathWithRunId.split('?')[1]}` : ''));
+    }
   };
 
   const handleOpenOrderDetail = (orderId: number, tabType: string) => {
@@ -309,6 +347,7 @@ export default function ShopeePage({ run, currentUser, onBackToSetup, readOnly =
           onBackToDashboard={() => handleSelectView('dashboard')}
           onNavigateToView={handleSelectView}
           activeView={activeView}
+          marketingCreateType={marketingCreateType}
           isOrderDetail={Boolean(activeOrderId)}
           isProductDetail={activeView === 'new-product' && Boolean(editingListingId)}
         />
@@ -319,7 +358,9 @@ export default function ShopeePage({ run, currentUser, onBackToSetup, readOnly =
             </div>
           )}
           <div className="flex min-w-0 flex-1 overflow-hidden">
-            {activeView !== 'new-product' && !activeOrderId && <Sidebar activeView={activeView} onSelectView={handleSelectView} />}
+            {activeView !== 'new-product' && activeView !== 'marketing-discount-create' && !activeOrderId && (
+              <Sidebar activeView={activeView} onSelectView={handleSelectView} />
+            )}
             {activeView === 'my-orders' ? (
               activeOrderId ? (
                 <MyOrderDetailView
@@ -350,6 +391,16 @@ export default function ShopeePage({ run, currentUser, onBackToSetup, readOnly =
               <MyIncomeView runId={run?.id ?? null} />
             ) : activeView === 'bank-accounts' ? (
               <MyBankAccountsView runId={run?.id ?? null} readOnly={readOnly} />
+            ) : activeView === 'marketing-discount-create' ? (
+              marketingCreateType === 'bundle' ? (
+                <BundleCreateView runId={run?.id ?? null} readOnly={readOnly} onBackToDiscount={() => handleSelectView('marketing-discount')} />
+              ) : (
+                <DiscountCreateView runId={run?.id ?? null} readOnly={readOnly} onBackToDiscount={() => handleSelectView('marketing-discount')} />
+              )
+            ) : activeView === 'marketing-discount' ? (
+              <MarketingDiscountView runId={run?.id ?? null} readOnly={readOnly} />
+            ) : activeView === 'marketing-centre' ? (
+              <MarketingCentreView runId={run?.id ?? null} readOnly={readOnly} />
             ) : (
               <Dashboard />
             )}
